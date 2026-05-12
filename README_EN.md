@@ -68,6 +68,16 @@ The following numbers are measured with the long-lived service already running a
 
 Rule of thumb: normal page reads and simple JS injection are around the `50ms` level; complex DOM queries depend on page structure and returned data size, commonly around `300ms`; `--monitor` adds page-change summary work and is usually close to `0.8s`.
 
+Reference comparison with the original Python call chain:
+
+| Item | Python Version | Rust CLI Version |
+| --- | --- | --- |
+| Startup model | Each call is more likely to pay for Python process startup, module loading, and connection initialization | CLI commands reuse the long-lived service and avoid repeated browser connection initialization |
+| Simple page read / JS injection | Usually more affected by process startup and the Python call chain, so latency is less stable | Commonly `0.04-0.12s` |
+| Repeated calls | Overhead is more visible across many short commands | Better suited for high-frequency Agent calls |
+
+This comparison is intended to describe the performance trend caused by the architecture difference. Actual latency still depends on page complexity, Chrome state, and response size.
+
 ## Layout
 
 ```text
