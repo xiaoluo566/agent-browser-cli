@@ -7,11 +7,12 @@
 
 要求：
 1. 优先使用 npm 安装：npm install -g @sleepinsummer/agent-browser-cli。
-2. 指导我在 Chrome 中加载 assets/tmwd_cdp_bridge 解压扩展。
-3. 如果之前已经加载过扩展，必须在 chrome://extensions 里重新加载 `assets/tmwd_cdp_bridge`，确保最新 `config.js` 和 `background.js` 生效。
-4. 将 skills/agent-browser-cli/SKILL.md 安装到当前 AI 可识别的 skills 目录。
-5. 执行 agent-browser-cli tabs、open 和 status 验证可用。
-6. 如果 npm 平台包暂不支持当前系统，再回退到源码构建：cargo build --release。
+2. 先询问我希望把 Chrome 扩展解压到哪个本地目录。
+3. 从 GitHub 最新 Release 下载 `chrome-extensions.zip`，解压到我指定的目录，并指导我在 Chrome 中加载解压后的 `tmwd_cdp_bridge` 扩展目录。
+4. 如果之前已经加载过扩展，必须在 chrome://extensions 里重新加载该扩展，确保最新 `config.js`、`content.js` 和 `background.js` 生效。
+5. 将 skills/agent-browser-cli/SKILL.md 安装到当前 AI 可识别的 skills 目录。
+6. 执行 agent-browser-cli tabs、open 和 status 验证可用。
+7. 如果 npm 平台包暂不支持当前系统，再回退到源码构建：cargo build --release。
 ```
 
 ## 1. 安装 CLI
@@ -54,11 +55,26 @@ cargo build --release
 
 ## 2. 加载 Chrome 扩展
 
-如果使用 npm 安装，需要先下载或克隆仓库，用于加载扩展和安装 skill：
+先询问用户希望把扩展解压到哪个本地目录，例如：
+
+```text
+请告诉我 Chrome 扩展希望解压到哪个目录，例如 ~/agent-browser-cli-extension。
+```
+
+然后下载最新 Release 中的 `chrome-extensions.zip` 并解压到该目录。zip 解压后内部目录仍是 `tmwd_cdp_bridge`：
 
 ```bash
-git clone https://github.com/sleepinginsummer/agent-browser-cli.git
-cd agent-browser-cli
+EXT_PARENT="$HOME/agent-browser-cli-extension"
+mkdir -p "$EXT_PARENT"
+ZIP_URL="$(curl -fsSL https://api.github.com/repos/sleepinginsummer/agent-browser-cli/releases/latest | grep -o '"browser_download_url": "[^"]*chrome-extensions.zip"' | head -n 1 | cut -d '"' -f 4)"
+curl -fL "$ZIP_URL" -o "$EXT_PARENT/chrome-extensions.zip"
+unzip -o "$EXT_PARENT/chrome-extensions.zip" -d "$EXT_PARENT"
+```
+
+解压后扩展目录应为：
+
+```text
+$EXT_PARENT/tmwd_cdp_bridge
 ```
 
 在 Chrome 打开：
@@ -70,10 +86,10 @@ chrome://extensions
 开启“开发者模式”，加载已解压扩展目录：
 
 ```text
-assets/tmwd_cdp_bridge
+$EXT_PARENT/tmwd_cdp_bridge
 ```
 
-如果之前已经安装过旧版 GenericAgent 的 `tmwd_cdp_bridge` 扩展，可以继续使用同协议旧扩展；但建议加载当前仓库的 `assets/tmwd_cdp_bridge` 并点击“重新加载”。
+如果之前已经安装过旧版 GenericAgent 的 `tmwd_cdp_bridge` 扩展，可以继续使用同协议旧扩展；但建议加载最新 Release 解压出来的 `tmwd_cdp_bridge` 并点击“重新加载”。
 
 当前扩展配置应包含：
 

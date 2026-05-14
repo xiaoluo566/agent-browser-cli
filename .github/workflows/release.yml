@@ -141,12 +141,20 @@ jobs:
           path: dist/npm
           merge-multiple: true
 
+      - name: Package Chrome extension
+        run: |
+          set -euo pipefail
+          mkdir -p dist/extension
+          cp -R assets/tmwd_cdp_bridge dist/extension/tmwd_cdp_bridge
+          (cd dist/extension && zip -r ../chrome-extensions.zip tmwd_cdp_bridge)
+
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mapfile -t npm_packages < <(find dist/npm -type f -name '*.tgz' | sort)
+          extension_package="dist/chrome-extensions.zip"
           TAG_MESSAGE="$(git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" | sed '/-----BEGIN PGP SIGNATURE-----/,$d' | sed '${/^$/d;}')"
           DEFAULT_NOTES="Rust/npm native release for macOS, Linux, and Windows."
           if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
@@ -157,11 +165,11 @@ jobs:
                 [ -n "${EXISTING_NOTES}" ] && printf '\n'
                 printf '%s\n' "${TAG_MESSAGE}"
               } > release-notes.md
-              gh release edit "${GITHUB_REF_NAME}" dist/bin/* "${npm_packages[@]}" \
+              gh release edit "${GITHUB_REF_NAME}" dist/bin/* "${npm_packages[@]}" "${extension_package}" \
                 --repo "${GITHUB_REPOSITORY}" \
                 --notes-file release-notes.md
             else
-              gh release edit "${GITHUB_REF_NAME}" dist/bin/* "${npm_packages[@]}" \
+              gh release edit "${GITHUB_REF_NAME}" dist/bin/* "${npm_packages[@]}" "${extension_package}" \
                 --repo "${GITHUB_REPOSITORY}"
             fi
           else
@@ -170,7 +178,7 @@ jobs:
             else
               printf '%s\n' "${DEFAULT_NOTES}" > release-notes.md
             fi
-            gh release create "${GITHUB_REF_NAME}" dist/bin/* "${npm_packages[@]}" \
+            gh release create "${GITHUB_REF_NAME}" dist/bin/* "${npm_packages[@]}" "${extension_package}" \
               --repo "${GITHUB_REPOSITORY}" \
               --title "${GITHUB_REF_NAME}" \
               --notes-file release-notes.md
