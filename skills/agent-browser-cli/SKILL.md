@@ -165,7 +165,7 @@ agent-browser-cli open https://example.com
 agent-browser-cli exec "location.href='https://example.com'; return location.href"
 ```
 
-新开标签页优先使用原生 `open` 命令，不要用 `window.open` 加 `--monitor`。`open` 底层走扩展 `chrome.tabs.create`，不会触发 CDP debugger attach。
+新开标签页优先使用原生 `open` 命令，不要用 `window.open` 加 `--monitor`。`open` 底层走扩展 `chrome.tabs.create`，不会触发 CDP debugger attach，默认不会聚焦浏览器窗口。
 
 ```bash
 agent-browser-cli open www.baidu.com
@@ -214,7 +214,13 @@ mouseMoved -> mousePressed -> mouseReleased
 
 Vue3 自定义 Select/Dropdown 优先走 vnode 实例调用；CDP 坐标点击适合选项少且可见的场景。CDP 下拉框流程是先点击 select 打开下拉，再测量动态 option，再点击 option。
 
-某些 SPA 后台标签不会加载数据，需要先用 CDP `Page.bringToFront` 切到前台。跨标签页操作时显式传 `tabId`，不依赖当前页。
+默认所有操作都不聚焦浏览器窗口。确实需要把浏览器带到前台时，CDP `Page.bringToFront` 必须显式传 `allowFocus:true`。
+
+```bash
+agent-browser-cli exec '{"cmd":"cdp","tabId":303987837,"method":"Page.bringToFront","allowFocus":true}'
+```
+
+某些 SPA 后台标签不会加载数据，必要时再显式使用上面的前台切换。跨标签页操作时显式传 `tabId`，不依赖当前页。
 
 页面存在 `transform: scale` 或 CSS `zoom` 时，坐标需要按页面缩放修正：
 
@@ -287,9 +293,9 @@ agent-browser-cli exec '{"cmd":"cdp","method":"Page.captureScreenshot","params":
 
 ## Autofill 与登录
 
-`scan` 输出的 input 若带 `data-autofilled="true"`，value 可能显示为受保护提示，不是真实值。Chrome 只在前台 tab 释放 autofill 保护值，所以必须先 CDP `Page.bringToFront`。
+`scan` 输出的 input 若带 `data-autofilled="true"`，value 可能显示为受保护提示，不是真实值。Chrome 只在前台 tab 释放 autofill 保护值，需要时显式 CDP `Page.bringToFront` 并传 `allowFocus:true`。
 
-一键释放流程：`Page.bringToFront` -> `mousePressed` 点任一字段，通常不需要 `mouseReleased` -> 等 500ms -> 补发 `input/change` 事件 -> 点登录。
+一键释放流程：`Page.bringToFront + allowFocus:true` -> `mousePressed` 点任一字段，通常不需要 `mouseReleased` -> 等 500ms -> 补发 `input/change` 事件 -> 点登录。
 
 ## 调试
 

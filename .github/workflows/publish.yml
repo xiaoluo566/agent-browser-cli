@@ -13,6 +13,7 @@ permissions:
 jobs:
   publish-binaries:
     name: Publish ${{ matrix.name }}
+    if: ${{ !contains(github.ref_name, '-extension') }}
     runs-on: ${{ matrix.os }}
     environment: npm
     strategy:
@@ -102,6 +103,7 @@ jobs:
 
   publish-main:
     name: Publish main package
+    if: ${{ !contains(github.ref_name, '-extension') }}
     runs-on: ubuntu-latest
     environment: npm
     needs: publish-binaries
@@ -137,12 +139,13 @@ jobs:
     name: GitHub Release
     needs: publish-binaries
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && (needs.publish-binaries.result == 'success' || needs.publish-binaries.result == 'skipped') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Download binary artifacts
+        if: ${{ !contains(github.ref_name, '-extension') }}
         uses: actions/download-artifact@v4
         with:
           pattern: agent-browser-cli-*
@@ -150,6 +153,7 @@ jobs:
           merge-multiple: true
 
       - name: Download npm package artifacts
+        if: ${{ !contains(github.ref_name, '-extension') }}
         uses: actions/download-artifact@v4
         with:
           pattern: npm-*
@@ -170,10 +174,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mapfile -t npm_packages < <(find dist/npm -type f -name '*.tgz' | sort)
+          release_assets=()
+          if [ -d dist/bin ]; then
+            while IFS= read -r file; do release_assets+=("${file}"); done < <(find dist/bin -type f | sort)
+          fi
+          if [ -d dist/npm ]; then
+            while IFS= read -r file; do release_assets+=("${file}"); done < <(find dist/npm -type f -name '*.tgz' | sort)
+          fi
           extension_package="dist/chrome-extensions.zip"
+          release_assets+=("${extension_package}")
           TAG_MESSAGE="$(git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" | sed '/-----BEGIN PGP SIGNATURE-----/,$d' | sed '${/^$/d;}')"
-          DEFAULT_NOTES="Rust/npm native release for macOS, Linux, and Windows."
+          if [[ "${GITHUB_REF_NAME}" == *-extension ]]; then
+            DEFAULT_NOTES="Chrome extension and skill update only. npm packages are unchanged."
+          else
+            DEFAULT_NOTES="Rust/npm native release for macOS, Linux, and Windows."
+          fi
           if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             EXISTING_NOTES="$(gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --json body --jq '.body // ""')"
             if [ -n "${TAG_MESSAGE}" ] && ! grep -Fq "${TAG_MESSAGE}" <<<"${EXISTING_NOTES}"; then
@@ -182,11 +197,11 @@ jobs:
                 [ -n "${EXISTING_NOTES}" ] && printf '\n'
                 printf '%s\n' "${TAG_MESSAGE}"
               } > release-notes.md
-              gh release edit "${GITHUB_REF_NAME}" dist/bin/* "${npm_packages[@]}" "${extension_package}" \
+              gh release edit "${GITHUB_REF_NAME}" "${release_assets[@]}" \
                 --repo "${GITHUB_REPOSITORY}" \
                 --notes-file release-notes.md
             else
-              gh release edit "${GITHUB_REF_NAME}" dist/bin/* "${npm_packages[@]}" "${extension_package}" \
+              gh release edit "${GITHUB_REF_NAME}" "${release_assets[@]}" \
                 --repo "${GITHUB_REPOSITORY}"
             fi
           else
@@ -195,7 +210,7 @@ jobs:
             else
               printf '%s\n' "${DEFAULT_NOTES}" > release-notes.md
             fi
-            gh release create "${GITHUB_REF_NAME}" dist/bin/* "${npm_packages[@]}" "${extension_package}" \
+            gh release create "${GITHUB_REF_NAME}" "${release_assets[@]}" \
               --repo "${GITHUB_REPOSITORY}" \
               --title "${GITHUB_REF_NAME}" \
               --notes-file release-notes.md

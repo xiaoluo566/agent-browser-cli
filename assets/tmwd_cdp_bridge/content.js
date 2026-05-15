@@ -142,13 +142,13 @@ async function handle(el) {
     if (cmd === 'cookies') {
       resp = await chrome.runtime.sendMessage({ cmd: 'cookies', url: req.url || location.href });
     } else if (cmd === 'cdp') {
-      resp = await chrome.runtime.sendMessage({ cmd: 'cdp', method: req.method, params: req.params || {}, tabId: req.tabId });
+      resp = await chrome.runtime.sendMessage({ cmd: 'cdp', method: req.method, params: req.params || {}, tabId: req.tabId, allowFocus: req.allowFocus });
     } else if (cmd === 'batch') {
       resp = await chrome.runtime.sendMessage({ cmd: 'batch', commands: req.commands, tabId: req.tabId });
     } else if (cmd === 'tabs') {
-      resp = await chrome.runtime.sendMessage({ cmd: 'tabs', method: req.method, tabId: req.tabId });
+      resp = await chrome.runtime.sendMessage({ cmd: 'tabs', method: req.method, tabId: req.tabId, allowFocus: req.allowFocus });
     } else if (cmd === 'openTab') {
-      resp = await chrome.runtime.sendMessage({ cmd: 'openTab', url: req.url, active: req.active });
+      resp = await chrome.runtime.sendMessage({ cmd: 'openTab', url: req.url, active: req.active, allowFocus: req.allowFocus });
     } else {
       resp = { ok: false, error: 'unknown cmd: ' + cmd };
     }

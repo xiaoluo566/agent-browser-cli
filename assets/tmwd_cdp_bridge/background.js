@@ -32,7 +32,8 @@ async function handleExtMessage(msg, sender) {
     try {
       if (msg.method === 'switch') {
         const tab = await chrome.tabs.update(msg.tabId, { active: true });
-        await chrome.windows.update(tab.windowId, { focused: true });
+        // 默认只切换 Chrome 内部 active tab，不抢占系统前台窗口。
+        if (msg.allowFocus === true && tab.windowId) await chrome.windows.update(tab.windowId, { focused: true });
         return { ok: true };
       } else {
         const tabs = (await chrome.tabs.query({})).filter(t => isScriptable(t.url));
@@ -133,7 +134,8 @@ async function handleOpenTab(msg) {
     const url = normalizeOpenUrl(msg.url);
     const active = msg.active !== false;
     const tab = await chrome.tabs.create({ url, active });
-    if (active && tab.windowId) await chrome.windows.update(tab.windowId, { focused: true });
+    // 默认创建/激活标签页但不聚焦浏览器窗口，避免打断当前工作区。
+    if (active && msg.allowFocus === true && tab.windowId) await chrome.windows.update(tab.windowId, { focused: true });
     return { ok: true, data: { id: tab.id, url: tab.url || url, title: tab.title || '', active: tab.active, windowId: tab.windowId } };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -162,6 +164,10 @@ async function handleBatch(msg, sender) {
         R.push({ ok: true, data: tabs.map(t => ({ id: t.id, url: t.url, title: t.title, active: t.active, windowId: t.windowId })) });
       } else if (c.cmd === 'cdp') {
         const tabId = c.tabId || msg.tabId || sender.tab?.id;
+        if (c.method === 'Page.bringToFront' && c.allowFocus !== true && msg.allowFocus !== true) {
+          R.push({ skipped: true, reason: 'Page.bringToFront requires allowFocus=true' });
+          continue;
+        }
         if (attached !== tabId) {
           if (attached) { await chrome.debugger.detach({ tabId: attached }); attached = null; }
           await chrome.debugger.attach({ tabId }, '1.3');
@@ -183,6 +189,9 @@ async function handleBatch(msg, sender) {
 async function handleCDP(msg, sender) {
   const tabId = msg.tabId || sender.tab?.id;
   if (!tabId) return { ok: false, error: 'no tabId' };
+  if (msg.method === 'Page.bringToFront' && msg.allowFocus !== true) {
+    return { ok: true, data: { skipped: true, reason: 'Page.bringToFront requires allowFocus=true' } };
+  }
   try {
     await chrome.debugger.attach({ tabId }, '1.3');
     const result = await chrome.debugger.sendCommand({ tabId }, msg.method, msg.params || {});
