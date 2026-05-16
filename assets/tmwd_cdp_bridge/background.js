@@ -28,6 +28,17 @@ async function handleExtMessage(msg, sender) {
   if (msg.cmd === 'cdp') return await handleCDP(msg, sender);
   if (msg.cmd === 'batch') return await handleBatch(msg, sender);
   if (msg.cmd === 'openTab') return await handleOpenTab(msg);
+  if (msg.cmd === 'closeTab') return await handleCloseTab(msg, sender);
+  if (msg.cmd === 'networkStart') return await handleNetworkStart(msg, sender);
+  if (msg.cmd === 'networkList') return await handleNetworkList(msg, sender);
+  if (msg.cmd === 'networkDetail') return await handleNetworkDetail(msg, sender);
+  if (msg.cmd === 'networkClear') return await handleNetworkClear(msg, sender);
+  if (msg.cmd === 'networkStop') return await handleNetworkStop(msg, sender);
+  if (msg.cmd === 'consoleStart') return await handleConsoleStart(msg, sender);
+  if (msg.cmd === 'consoleList') return await handleConsoleList(msg, sender);
+  if (msg.cmd === 'consoleClear') return await handleConsoleClear(msg, sender);
+  if (msg.cmd === 'consoleStop') return await handleConsoleStop(msg, sender);
+  if (msg.cmd === 'debugClearAll') return await handleDebugClearAll();
   if (msg.cmd === 'tabs') {
     try {
       if (msg.method === 'switch') {
@@ -129,17 +140,376 @@ async function handleCookies(msg, sender) {
   }
 }
 
+
+const debugSessions = new Map();
+
+function resolveTabId(msg, sender) {
+  const tabId = Number(msg.tabId || sender.tab?.id);
+  if (!Number.isInteger(tabId) || tabId <= 0) throw new Error('no tabId');
+  return tabId;
+}
+
+function getDebugSession(tabId) {
+  let session = debugSessions.get(tabId);
+  if (!session) {
+    session = {
+      tabId,
+      attached: false,
+      network: false,
+      console: false,
+      requests: new Map(),
+      requestOrder: [],
+      logs: []
+    };
+    debugSessions.set(tabId, session);
+  }
+  return session;
+}
+
+async function ensureDebugAttached(session) {
+  if (session.attached) return;
+  await chrome.debugger.attach({ tabId: session.tabId }, '1.3');
+  session.attached = true;
+}
+
+async function detachDebugIfIdle(session) {
+  if (!session.attached || session.network || session.console) return;
+  try { await chrome.debugger.detach({ tabId: session.tabId }); } catch (_) {}
+  session.attached = false;
+}
+
+async function handleNetworkStart(msg, sender) {
+  try {
+    const tabId = resolveTabId(msg, sender);
+    const session = getDebugSession(tabId);
+    await ensureDebugAttached(session);
+    await chrome.debugger.sendCommand({ tabId }, 'Network.enable', {});
+    session.network = true;
+    return { ok: true, status: 'started', tabId, count: session.requestOrder.length };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+async function handleNetworkList(msg, sender) {
+  try {
+    const tabId = resolveTabId(msg, sender);
+    const session = getDebugSession(tabId);
+    const filter = String(msg.filter || '').toLowerCase();
+    const limit = Math.max(1, Math.min(Number(msg.limit || 100), 1000));
+    let items = session.requestOrder.map(id => session.requests.get(id)).filter(Boolean);
+    if (filter) {
+      items = items.filter(item => [item.url, item.method, item.status, item.mimeType, item.resourceType].some(v => String(v || '').toLowerCase().includes(filter)));
+    }
+    items = items.slice(-limit).map(summarizeRequest);
+    return { ok: true, status: session.network ? 'started' : 'stopped', tabId, count: items.length, requests: items };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+async function handleNetworkDetail(msg, sender) {
+  try {
+    const tabId = resolveTabId(msg, sender);
+    const requestId = String(msg.requestId || '');
+    const session = getDebugSession(tabId);
+    const item = session.requests.get(requestId);
+    if (!item) return { ok: false, error: 'unknown requestId: ' + requestId };
+    const detail = Object.assign({}, item);
+    if (item.completed && !item.failed && session.attached) {
+      try {
+        const body = await chrome.debugger.sendCommand({ tabId }, 'Network.getResponseBody', { requestId });
+        detail.body = truncateText(body.body || '', 20000);
+        detail.base64Encoded = !!body.base64Encoded;
+        detail.bodyTruncated = String(body.body || '').length > 20000;
+      } catch (e) {
+        detail.bodyError = e.message;
+      }
+    }
+    return { ok: true, tabId, request: detail };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+async function handleNetworkClear(msg, sender) {
+  try {
+    const tabId = resolveTabId(msg, sender);
+    const session = getDebugSession(tabId);
+    session.requests.clear();
+    session.requestOrder = [];
+    return { ok: true, status: 'cleared', tabId };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+async function handleNetworkStop(msg, sender) {
+  try {
+    const tabId = resolveTabId(msg, sender);
+    const session = getDebugSession(tabId);
+    if (session.attached) {
+      try { await chrome.debugger.sendCommand({ tabId }, 'Network.disable', {}); } catch (_) {}
+    }
+    session.network = false;
+    session.requests.clear();
+    session.requestOrder = [];
+    await detachDebugIfIdle(session);
+    return { ok: true, status: 'stopped', cleared: true, tabId };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+async function handleConsoleStart(msg, sender) {
+  try {
+    const tabId = resolveTabId(msg, sender);
+    const session = getDebugSession(tabId);
+    await ensureDebugAttached(session);
+    await chrome.debugger.sendCommand({ tabId }, 'Runtime.enable', {});
+    await chrome.debugger.sendCommand({ tabId }, 'Log.enable', {}).catch(() => null);
+    session.console = true;
+    return { ok: true, status: 'started', tabId, count: session.logs.length };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+async function handleConsoleList(msg, sender) {
+  try {
+    const tabId = resolveTabId(msg, sender);
+    const session = getDebugSession(tabId);
+    const level = String(msg.level || '').toLowerCase();
+    const limit = Math.max(1, Math.min(Number(msg.limit || 100), 1000));
+    let logs = session.logs;
+    if (level) logs = logs.filter(item => String(item.level || '').toLowerCase() === level);
+    return { ok: true, status: session.console ? 'started' : 'stopped', tabId, count: logs.length, logs: logs.slice(-limit) };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+async function handleConsoleClear(msg, sender) {
+  try {
+    const tabId = resolveTabId(msg, sender);
+    const session = getDebugSession(tabId);
+    session.logs = [];
+    return { ok: true, status: 'cleared', tabId };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+async function handleConsoleStop(msg, sender) {
+  try {
+    const tabId = resolveTabId(msg, sender);
+    const session = getDebugSession(tabId);
+    if (session.attached) {
+      try { await chrome.debugger.sendCommand({ tabId }, 'Runtime.disable', {}); } catch (_) {}
+      try { await chrome.debugger.sendCommand({ tabId }, 'Log.disable', {}); } catch (_) {}
+    }
+    session.console = false;
+    session.logs = [];
+    await detachDebugIfIdle(session);
+    return { ok: true, status: 'stopped', cleared: true, tabId };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+function summarizeRequest(item) {
+  return {
+    requestId: item.requestId,
+    url: item.url,
+    method: item.method,
+    status: item.status,
+    mimeType: item.mimeType,
+    resourceType: item.resourceType,
+    completed: !!item.completed,
+    failed: !!item.failed,
+    errorText: item.errorText,
+    timestamp: item.timestamp
+  };
+}
+
+function rememberRequest(session, requestId) {
+  if (!session.requests.has(requestId)) session.requestOrder.push(requestId);
+  while (session.requestOrder.length > 1000) {
+    const old = session.requestOrder.shift();
+    session.requests.delete(old);
+  }
+  let item = session.requests.get(requestId);
+  if (!item) {
+    item = { requestId };
+    session.requests.set(requestId, item);
+  }
+  return item;
+}
+
+function pushLog(session, item) {
+  session.logs.push(item);
+  if (session.logs.length > 1000) session.logs.splice(0, session.logs.length - 1000);
+}
+
+function remoteObjectText(arg) {
+  if (!arg) return '';
+  if ('value' in arg) {
+    if (typeof arg.value === 'string') return truncateText(arg.value, 2000);
+    try { return truncateText(JSON.stringify(arg.value), 2000); } catch (_) { return String(arg.value); }
+  }
+  return truncateText(arg.description || arg.type || '', 2000);
+}
+
+function truncateText(text, max) {
+  const value = String(text || '');
+  return value.length > max ? value.slice(0, max) : value;
+}
+
+function onDebuggerEvent(source, method, params) {
+  const tabId = source.tabId;
+  if (!tabId) return;
+  const session = debugSessions.get(tabId);
+  if (!session) return;
+  if (method === 'Network.requestWillBeSent') {
+    const item = rememberRequest(session, params.requestId);
+    item.url = params.request?.url || item.url;
+    item.method = params.request?.method || item.method;
+    item.resourceType = params.type || item.resourceType;
+    item.timestamp = params.wallTime || params.timestamp || item.timestamp;
+    item.requestHeaders = params.request?.headers;
+  } else if (method === 'Network.responseReceived') {
+    const item = rememberRequest(session, params.requestId);
+    item.status = params.response?.status;
+    item.statusText = params.response?.statusText;
+    item.mimeType = params.response?.mimeType;
+    item.responseHeaders = params.response?.headers;
+    item.url = params.response?.url || item.url;
+    item.resourceType = params.type || item.resourceType;
+  } else if (method === 'Network.loadingFinished') {
+    const item = rememberRequest(session, params.requestId);
+    item.completed = true;
+    item.encodedDataLength = params.encodedDataLength;
+  } else if (method === 'Network.loadingFailed') {
+    const item = rememberRequest(session, params.requestId);
+    item.completed = true;
+    item.failed = true;
+    item.errorText = params.errorText;
+  } else if (method === 'Runtime.consoleAPICalled') {
+    pushLog(session, {
+      level: params.type || 'log',
+      text: (params.args || []).map(remoteObjectText).join(' '),
+      timestamp: params.timestamp || Date.now(),
+      url: params.stackTrace?.callFrames?.[0]?.url || '',
+      line: params.stackTrace?.callFrames?.[0]?.lineNumber,
+      column: params.stackTrace?.callFrames?.[0]?.columnNumber
+    });
+  } else if (method === 'Runtime.exceptionThrown') {
+    pushLog(session, {
+      level: 'error',
+      text: params.exceptionDetails?.text || params.exceptionDetails?.exception?.description || 'exception thrown',
+      timestamp: params.timestamp || Date.now(),
+      url: params.exceptionDetails?.url || '',
+      line: params.exceptionDetails?.lineNumber,
+      column: params.exceptionDetails?.columnNumber
+    });
+  } else if (method === 'Log.entryAdded') {
+    const e = params.entry || {};
+    pushLog(session, {
+      level: e.level || 'log',
+      text: e.text || '',
+      timestamp: e.timestamp || Date.now(),
+      url: e.url || '',
+      line: e.lineNumber,
+      column: undefined
+    });
+  }
+}
+
+function onDebuggerDetach(source) {
+  if (!source.tabId) return;
+  const session = debugSessions.get(source.tabId);
+  if (session) {
+    session.attached = false;
+    session.network = false;
+    session.console = false;
+  }
+}
+
+chrome.debugger.onEvent.addListener(onDebuggerEvent);
+chrome.debugger.onDetach.addListener(onDebuggerDetach);
+
+
+
+async function handleCloseTab(msg, sender) {
+  try {
+    const tabId = Number(msg.tabId || sender.tab?.id);
+    if (!Number.isInteger(tabId) || tabId <= 0) throw new Error('tabId is required');
+    const session = debugSessions.get(tabId);
+    if (session?.attached) {
+      try { await chrome.debugger.detach({ tabId }); } catch (_) {}
+    }
+    debugSessions.delete(tabId);
+    await chrome.tabs.remove(tabId);
+    return { ok: true, data: { status: 'success', tabId } };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+async function handleDebugClearAll() {
+  const tabIds = [...debugSessions.keys()];
+  for (const tabId of tabIds) {
+    const session = debugSessions.get(tabId);
+    if (!session) continue;
+    session.requests.clear();
+    session.requestOrder = [];
+    session.logs = [];
+    session.network = false;
+    session.console = false;
+    if (session.attached) {
+      try { await chrome.debugger.detach({ tabId }); } catch (_) {}
+      session.attached = false;
+    }
+  }
+  debugSessions.clear();
+  return { ok: true, status: 'cleared', tabs: tabIds.length };
+}
+
 async function handleOpenTab(msg) {
   try {
     const url = normalizeOpenUrl(msg.url);
     const active = msg.active !== false;
     const tab = await chrome.tabs.create({ url, active });
+    const group = await groupTabIfRequested(tab.id, msg.groupTitle);
     // 默认创建/激活标签页但不聚焦浏览器窗口，避免打断当前工作区。
     if (active && msg.allowFocus === true && tab.windowId) await chrome.windows.update(tab.windowId, { focused: true });
-    return { ok: true, data: { id: tab.id, url: tab.url || url, title: tab.title || '', active: tab.active, windowId: tab.windowId } };
+    return { ok: true, data: { id: tab.id, url: tab.url || url, title: tab.title || '', active: tab.active, windowId: tab.windowId, group } };
   } catch (e) {
     return { ok: false, error: e.message };
   }
+}
+
+async function groupTabIfRequested(tabId, title) {
+  const cleanTitle = String(title || '').trim();
+  if (!cleanTitle) return null;
+  if (!chrome.tabs?.group || !chrome.tabGroups?.update) {
+    return { ok: false, skipped: true, reason: 'tabGroups API unavailable' };
+  }
+  try {
+    const existing = await findTabGroupByTitle(cleanTitle);
+    const groupId = await chrome.tabs.group(existing ? { tabIds: tabId, groupId: existing.id } : { tabIds: tabId });
+    await chrome.tabGroups.update(groupId, { title: cleanTitle });
+    return { ok: true, id: groupId, title: cleanTitle };
+  } catch (e) {
+    // 分组只是整理标签，不影响打开页面的主流程。
+    return { ok: false, skipped: true, reason: e.message };
+  }
+}
+
+async function findTabGroupByTitle(title) {
+  if (!chrome.tabGroups?.query) return null;
+  const groups = await chrome.tabGroups.query({});
+  return groups.find(group => group.title === title) || null;
 }
 
 function normalizeOpenUrl(url) {

@@ -1,244 +1,204 @@
 ---
 name: agent-browser-cli
-description: 使用 agent-browser-cli 进行浏览器感知与控制。适用于标签页扫描/切换、页面 JS 执行、Cookie、CDP、contentSettings、截图、文件上传、下拉框点击、tmwd_cdp_bridge 初始化和 Web 工具排障。
+description: 使用 agent-browser-cli 进行浏览器感知与控制、页面交互、截图/PDF、Cookie/CDP 和排障。
 ---
 
 # agent-browser-cli
 
-使用 `agent-browser-cli` 进行浏览器控制。底层通过 Rust 常驻服务和 Chrome 扩展接管用户浏览器，保留登录态和 Cookie；不是 Selenium/Playwright。
+使用 `agent-browser-cli` 控制用户真实 Chrome。底层是 Rust daemon + Chrome 扩展桥，保留登录态和 Cookie；不是 Selenium/Playwright。
 
-## 项目路径
+## 先做健康检查
 
-安装后必须把下面的占位路径替换为用户本机真实项目路径，避免 AI 在其它项目目录里误找工具：
-
-```bash
-<AGENT_BROWSER_CLI_PROJECT_DIR>
-```
-
-日常调用先进入用户本机真实项目路径：
-
-```bash
-cd <AGENT_BROWSER_CLI_PROJECT_DIR>
-```
-
-优先通过 npm 安装 CLI：
-
-```bash
-npm install -g @sleepinsummer/agent-browser-cli
-agent-browser-cli --help
-```
-
-如果 npm 平台包不可用，再在项目根目录源码构建：
-
-```bash
-cargo build --release
-./target/release/agent-browser-cli --help
-```
-
-扩展目录：
-
-```text
-assets/tmwd_cdp_bridge
-```
-
-扩展配置必须存在：
-
-```js
-globalThis.__agent_browser_cli_TID = '__agent_browser_cli_bridge_26c9f1';
-```
-
-对应文件：
-
-```text
-assets/tmwd_cdp_bridge/config.js
-```
-
-## 最小自检
-
-Chrome 必须已打开，且至少有一个正常网页标签页，不能只停留在 `about:blank`、`chrome://` 等内部页。
-
-优先用常驻会话 CLI 自检。它会自动启动 Rust 常驻服务，复用同一个浏览器扩展连接，默认空闲 300 秒自动退出；每次请求都会续期。
-
-```bash
-agent-browser-cli tabs
-```
-
-服务状态、停止和重载：
+每次开始浏览器任务，先执行：
 
 ```bash
 agent-browser-cli status
-agent-browser-cli stop
-agent-browser-cli restart
 ```
 
-常驻服务端口：
-- `18765`：默认插件 WebSocket 端口，Chrome 扩展连接使用，可通过插件 popup 或 `agent-browser-cli set-extension-port <port>` 修改。
-- `18767`：外层 `agent-browser-cli` HTTP API 端口，供 CLI 复用会话，不能作为插件端口使用。
+`healthy=true` 且 `summary=ready` 时再继续操作。
 
-插件端口配置文件：
+如果不健康，执行：
+
+```bash
+agent-browser-cli doctor
+agent-browser-cli logs --tail 100
+```
+
+再按 `references/operations.md` 处理。`doctor` 只检查状态，不自动启动 daemon、不改配置、不安装 skill。
+
+## 常用命令优先级
+
+先区分三个入口：
+
+```text
+scan：内容感知，适合看正文、列表、页面文本。
+snapshot：操作定位，适合找按钮、链接、输入框并生成 @e 引用。
+exec / JSON CDP：逃生口，封装命令失效或特殊页面时回退。
+```
+
+基础排障和感知：
+
+```bash
+agent-browser-cli status
+agent-browser-cli doctor
+agent-browser-cli logs --tail 100
+agent-browser-cli tabs
+agent-browser-cli scan --tabs-only
+agent-browser-cli scan --tab <tabId> --text-only
+agent-browser-cli open https://example.com
+agent-browser-cli close --tab <tabId>
+agent-browser-cli exec --tab <tabId> 'return document.title'
+```
+
+第二阶段后的推荐流程：
+
+```text
+看页面内容：scan / scan --text-only
+selector 明确时：直接 click/fill selector
+selector 不明确或页面复杂时：snapshot 生成 @e，再 click/fill @e
+页面结构或内容变化后：重新 snapshot
+封装命令失效或覆盖不到特殊页面时：回退 exec / JSON CDP / 自定义 JS
+```
+
+示例：
+
+```bash
+agent-browser-cli scan --text-only
+agent-browser-cli click 'button[type=submit]'
+agent-browser-cli snapshot --limit 200
+agent-browser-cli snapshot --offset 200 --limit 200
+agent-browser-cli snapshot --details
+agent-browser-cli click '@e1'
+agent-browser-cli fill '@e2' 'hello'
+agent-browser-cli fill '@e2' --clear
+agent-browser-cli fill '@e2' ' world' --append
+agent-browser-cli send-keys --target '@e2' 'Enter'
+agent-browser-cli mouse-click '@e3'
+```
+
+所有高层操作都支持 `--tab <tabId>`；`@e` 只在当前 daemon、当前 tab、最近一次 `snapshot` 内有效。`@e` 只接受 `@e1` 这种带 `@` 的格式。
+
+慢页面要把等待和监控分开：
+
+```bash
+agent-browser-cli click '@e1' --wait-js 'return document.body.innerText.includes("完成")' --wait-timeout 10 --monitor
+```
+
+`--wait-js` 负责等慢加载；`--monitor` 只负责操作前后页面 diff，默认关闭。
+
+## 端口和扩展
+
+固定 API 端口：
+
+```text
+127.0.0.1:18767
+```
+
+默认扩展 WebSocket 端口：
+
+```text
+127.0.0.1:18765
+```
+
+配置文件：
 
 ```text
 ~/.agent-browser-cli/config.json
 ```
 
-最小配置：
-
-```json
-{
-  "extension_port": 18765
-}
-```
-
-CLI 修改插件端口：
+修改扩展端口会影响 Chrome 扩展和 daemon 连接，执行前必须说明影响并取得用户确认：
 
 ```bash
-agent-browser-cli set-extension-port 18766
+agent-browser-cli set-extension-port <port>
 ```
 
-Chrome 插件 popup 也可以修改插件端口并立即重连。插件端口必须和 CLI 配置中的 `extension_port` 一致。
 
-成功标志：
-- 返回 `status=success`
-- 能看到 `tabs_count`
-- `agent-browser-cli status` 中 `ports.extension.matched=true`
-- `agent-browser-cli status` 中 `connection.extension_connected=true`
 
-## 推荐 CLI 调用
+## 网络和控制台调试
 
-日常操作优先使用 `agent-browser-cli`，避免直接操作底层协议。
+`network` / `console` 需要扩展侧持续监听 CDP 事件。修改或升级扩展后，必须先让用户重载 Chrome 插件。
 
 ```bash
-cd <AGENT_BROWSER_CLI_PROJECT_DIR>
-agent-browser-cli status
-agent-browser-cli tabs
-agent-browser-cli scan --tabs-only
-agent-browser-cli scan --tab 303987837 --text-only
-agent-browser-cli open https://www.baidu.com
-agent-browser-cli exec --tab 303987837 'return document.title'
-agent-browser-cli exec --tab 303987837 '{"cmd":"tabs"}'
-agent-browser-cli restart
-agent-browser-cli stop
+agent-browser-cli network start --tab <tabId>
+agent-browser-cli network list --tab <tabId> --filter api
+agent-browser-cli network detail <requestId> --tab <tabId>
+agent-browser-cli network clear --tab <tabId>
+agent-browser-cli network stop --tab <tabId>
+
+agent-browser-cli console start --tab <tabId>
+agent-browser-cli console list --tab <tabId>
+agent-browser-cli console list --tab <tabId> --level error
+agent-browser-cli console clear --tab <tabId>
+agent-browser-cli console stop --tab <tabId>
 ```
 
-执行较复杂 JS 时，把脚本写入文件再调用：
+`network detail` 会截断大响应体并标记 `base64Encoded`，不要把巨大 body 粘到对话里。`network clear` 清请求缓存；`network stop` 会停止监听并清请求缓存。`console clear` 清日志缓存；`console stop` 会停止监听并清日志缓存。
+
+
+`agent-browser-cli stop` / daemon idle 退出时会额外清理 daemon 内的 snapshot/@e 缓存，并通知扩展清理 network/console 调试缓存。
+
+## 标签分组
+
+多任务开新标签时可以用 session 或 group-title 把标签放入 Chrome 原生标签组。分组只是整理浏览器标签，失败不影响开 tab 主流程。
 
 ```bash
-agent-browser-cli exec --tab 303987837 --file /tmp/script.js
-```
-
-`exec` 默认只执行 JS，不做执行前后 DOM 扫描。需要页面变化摘要时显式加 `--monitor`。
-
-```bash
-agent-browser-cli exec --tab 303987837 --monitor 'return document.title'
-```
-
-需要等待页面变化时，不要在脚本里固定 `setTimeout`。优先用 `--wait-js` 做条件等待，条件满足会立即返回；普通页面 JS 会把主脚本和等待条件合并到同一次浏览器执行里，减少往返：
-
-```bash
-agent-browser-cli exec --tab 303987837 'document.querySelector("button").click()' --wait-js 'return document.body.innerText.includes("完成")' --wait-timeout 3
-```
-
-## 基础调用
-
-`scan` 负责感知，`exec` 负责精确操作。能精确操作时，不做全量扫描。
-
-```bash
-agent-browser-cli scan --tabs-only
-agent-browser-cli scan
-agent-browser-cli scan --text-only
-agent-browser-cli scan --tab 303987837
-```
-
-普通页面 JS：
-
-```bash
-agent-browser-cli exec 'return document.title'
-agent-browser-cli exec 'return { title: document.title, url: location.href }'
-```
-
-`exec` 内使用 `await` 时必须显式 `return`，否则结果可能是 `null`。
-
-`scan` 只读取当前页，不负责导航。切换网站用 `open` 或 `exec` 执行：
-
-```bash
+agent-browser-cli open https://example.com --session research
 agent-browser-cli open https://example.com
-agent-browser-cli exec "location.href='https://example.com'; return location.href"
+agent-browser-cli close --tab <tabId> --group-title "任务A"
 ```
 
-新开标签页优先使用原生 `open` 命令，不要用 `window.open` 加 `--monitor`。`open` 底层走扩展 `chrome.tabs.create`，不会触发 CDP debugger attach，默认不会聚焦浏览器窗口。
+`--session` 和 `--group-title` 都会作为标签组标题；两者同时传时优先使用 `--group-title`。
+
+## 截图和 PDF
+
+截图/PDF 必须让 CLI 写文件，不要把 base64 大段塞进上下文。命令只返回路径、字节数和少量元信息。
 
 ```bash
-agent-browser-cli open www.baidu.com
-agent-browser-cli new-tab https://example.com --background
+agent-browser-cli screenshot --out /tmp/page.png
+agent-browser-cli screenshot --full-page --out /tmp/full.png
+agent-browser-cli screenshot --target '@e1' --out /tmp/button.png
+agent-browser-cli screenshot --selector 'button[type=submit]' --format jpeg --quality 70 --out /tmp/button.jpg
+agent-browser-cli save-pdf --out /tmp/page.pdf
+agent-browser-cli save-pdf --paper a4 --landscape --scale 0.9 --out /tmp/page.pdf
 ```
 
-JS 事件的 `isTrusted=false`，敏感操作可能被页面拦截。JS 点击按钮打不开新 tab 时，优先改用 CDP 点击。
+`screenshot` 默认截当前视口；`--full-page` 截全页；`--target` 和兼容别名 `--selector` 二选一，目标既可以是 `@e` 也可以是 CSS selector。没有 `--out` 时，截图写到 `/tmp/agent-browser-cli-screenshots/`。
 
-## 扩展 JSON 指令
+`save-pdf` 默认 `paper=a4`、`scale=1.0`、`print-background=true`；需要关闭背景时用 `--no-print-background`。没有 `--out` 时，PDF 写到 `/tmp/agent-browser-cli-pdfs/`，默认文件名来自清理后的页面标题。
 
-跨标签页、Cookie、CDP、扩展管理、浏览器内容权限时，优先用 JSON 字符串直传，不要自己拼 DOM 节点。
+如果封装命令失效，用 `exec` 调 CDP 后由脚本落盘，仍然避免把 base64 粘到对话里。
+
+## exec 使用规则
+
+执行复杂 JS 时写入临时文件：
+
+```bash
+agent-browser-cli exec --tab <tabId> --file /tmp/script.js
+```
+
+需要等待页面变化时使用 `--wait-js`，不要在脚本里固定 `setTimeout`：
+
+```bash
+agent-browser-cli exec --tab <tabId> 'document.querySelector("button").click()' --wait-js 'return document.body.innerText.includes("完成")' --wait-timeout 3
+```
+
+`exec` 中使用 `await` 必须显式 `return`，否则结果可能是 `null`。
+
+## JSON/CDP 逃生口
+
+跨标签页、Cookie、CDP、扩展管理、浏览器内容权限时，用 JSON 指令：
 
 ```bash
 agent-browser-cli exec '{"cmd":"tabs"}'
 agent-browser-cli exec '{"cmd":"cookies"}'
 agent-browser-cli exec '{"cmd":"cdp","tabId":303987837,"method":"Page.captureScreenshot","params":{"format":"png"}}'
-agent-browser-cli exec '{"cmd":"batch","tabId":303987837,"commands":[{"cmd":"tabs"},{"cmd":"cookies"}]}'
 ```
 
-常用命令：
-- `{"cmd":"tabs"}`：读取或切换标签页。
-- `{"cmd":"openTab","url":"https://example.com","active":true}`：原生创建标签页。
-- `{"cmd":"cookies"}`：读取当前页 Cookie。
-- `{"cmd":"cdp","tabId":N,"method":"...","params":{}}`：执行单个 CDP 命令。
-- `{"cmd":"batch","tabId":N,"commands":[...]}`：同一链路内批量执行，支持 `$N.path` 引用前序结果。
-- `{"cmd":"management","method":"list|reload|disable|enable","extId":"..."}`：管理扩展。
-- `{"cmd":"contentSettings","type":"automaticDownloads","pattern":"https://*/*","setting":"allow"}`：设置内容权限。
-
-`contentSettings` 用于绕过 Chrome “下载多个文件”对话框，该对话框会阻塞浏览器 JS 执行。可选 `type` 包括 `automaticDownloads`、`popups`、`notifications` 等；`setting` 包括 `allow`、`block`、`ask`。CDP 的 `Browser.setDownloadBehavior` 在当前扩展环境不可用，因为 `chrome.debugger` 是 tab 级权限。
-
-`batch` 前序命令失败时，后续 `$N.path` 引用会静默变成 `undefined`，必须检查 `results` 数组中每项的 `ok` 状态。同一条 CDP 链路内保持 `nodeId` 来源一致，不要混用 `querySelector` 路径和 `performSearch` 路径。
-
-CDP 默认使用当前注入页的 `sender.tab.id`，跨 tab 操作必须显式传 `tabId`，或先在 `batch` 里通过 `tabs` 查询目标标签。
-
-## CDP 操作要点
-
-通用点击使用三事件序列：
-
-```text
-mouseMoved -> mousePressed -> mouseReleased
-```
-
-省略 `mouseMoved` 可能导致 MUI Tooltip、Ant Design Dropdown 等 hover 依赖组件失效。稳定状态下 CDP 坐标等于 `getBoundingClientRect()` 坐标，不需要修正。
-
-首次 CDP attach 会触发 Chrome infobar，页面内容可能下移约 20px。首次操作前先发无害 `mouseMoved(0,0)` 预热，再测量元素坐标。
-
-Vue3 自定义 Select/Dropdown 优先走 vnode 实例调用；CDP 坐标点击适合选项少且可见的场景。CDP 下拉框流程是先点击 select 打开下拉，再测量动态 option，再点击 option。
-
-默认所有操作都不聚焦浏览器窗口。确实需要把浏览器带到前台时，CDP `Page.bringToFront` 必须显式传 `allowFocus:true`。
-
-```bash
-agent-browser-cli exec '{"cmd":"cdp","tabId":303987837,"method":"Page.bringToFront","allowFocus":true}'
-```
-
-某些 SPA 后台标签不会加载数据，必要时再显式使用上面的前台切换。跨标签页操作时显式传 `tabId`，不依赖当前页。
-
-页面存在 `transform: scale` 或 CSS `zoom` 时，坐标需要按页面缩放修正：
-
-```js
-const scale = window.visualViewport ? window.visualViewport.scale : 1;
-const zoom = parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
-const realX = x * zoom;
-const realY = y * zoom;
-return { scale, zoom, realX, realY };
-```
-
-需要转物理坐标时：`physX = (screenX + rect中心x) * dpr`，`physY = (screenY + chromeH + rect中心y) * dpr`，其中 `chromeH = outerHeight - innerHeight`。
-
-CDP 文本输入：`Input.insertText` 快但没有完整 key 事件，受控组件需要补发 `input` 事件；需要完整键盘模拟时用 `Input.dispatchKeyEvent` 逐键派发。
+CDP 点击优先三事件序列：`mouseMoved -> mousePressed -> mouseReleased`。首次 attach 可能出现 Chrome infobar，先发无害 `mouseMoved(0,0)` 预热。
 
 ## 文件上传
 
-文件上传优先用 DataTransfer API，纯 JS、无 CDP 依赖：
+文件上传优先用 DataTransfer API，不优先使用 CDP `DOM.setFileInputFiles`：
 
 ```js
 const input = document.querySelector('input[type=file]');
@@ -251,61 +211,8 @@ input.dispatchEvent(new Event('change', { bubbles: true }));
 return input.files.length;
 ```
 
-不优先使用 CDP `DOM.setFileInputFiles`，因为在 tmwd 桥环境里 `nodeId` 跨调用容易失效。若必须用 CDP，尽量在同一个 `batch` 内完成 `getDocument -> querySelector -> setFileInputFiles`，不要混用不同来源的 `nodeId`。
+## 运维入口
 
-上传前检查 `input.accept`。页面有多个文件 input 时，用 `accept`、父容器文案、相邻 label 区分目标 input。上传后前端框架可能不感知，必要时补发 `input` / `change` 事件。
-
-瞬态 input 的核心是缩短“发现 input -> set files”的时间窗：优先同 batch 完成；再不行用 DOM 事件监听；猴子补丁只作兜底思路。
-
-## 下载与图片搜索
-
-PDF 链接在浏览器内预览而非下载时，用页面 JS 触发 Blob 下载。该方式要求同源或 CORS 允许；跨域时先导航到目标域再执行。
-
-```js
-return fetch('PDF_URL').then(r => r.blob()).then(b => {
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(b);
-  a.download = 'filename.pdf';
-  a.click();
-  return true;
-});
-```
-
-Google 图搜场景不要硬编码混淆 class。点击结果优先找 `[role=button]` 容器；`scan` 可能过滤边栏，弹出后用 JS 读 `document.body.innerText`；大图遍历 `img` 按 `naturalWidth` 最大取 `src`；“访问”链接遍历 `a` 找 `textContent.includes('访问')` 的 `href`；缩略图直接提取 `img[src^="data:image"]`。
-
-## iframe、Shadow DOM 与截图
-
-同源 iframe 会被 `scan` 自动穿透。跨域 iframe 优先走 CDP：`Page.getFrameTree` 找 `frameId`，再 `Page.createIsolatedWorld` 获取 `contextId`，最后用 `Runtime.evaluate` 在 iframe 上下文执行。
-
-iframe 内元素做 CDP 点击时，坐标需要合成：`finalX = iframeRect.x + elRect.x`，`finalY = iframeRect.y + elRect.y`。`Target.getTargets` / `Target.attachToTarget` 在当前 CDP 桥里通常会返回 `Not allowed`，不要优先走这条路。postMessage 中继只在 content script 已注入 iframe 时可靠，第三方支付 iframe 通常不可用。
-
-closed Shadow DOM 使用 `DOM.getDocument({depth:-1,pierce:true})`，再逐级 `DOM.querySelector`。`nodeId` 在 DOM 变更后会失效，必要时重新 `getDocument`。
-
-`DOM.getBoxModel` 返回 content 四点坐标，中心点用四点平均，不要简化成对角线平均；元素存在 rotate/skew 时四点不一定是矩形。`DOM.querySelector` 不能跨 Shadow 边界写组合选择器，要先找 host，再在 shadow 内找子元素。
-
-截图优先 CDP：
-
-```bash
-agent-browser-cli exec '{"cmd":"cdp","method":"Page.captureScreenshot","params":{"format":"png"}}'
-```
-
-验证码 canvas/img 优先用 JS `canvas.toDataURL()` 或直接读取图片 `src`。
-
-## Autofill 与登录
-
-`scan` 输出的 input 若带 `data-autofilled="true"`，value 可能显示为受保护提示，不是真实值。Chrome 只在前台 tab 释放 autofill 保护值，需要时显式 CDP `Page.bringToFront` 并传 `allowFocus:true`。
-
-一键释放流程：`Page.bringToFront + allowFocus:true` -> `mousePressed` 点任一字段，通常不需要 `mouseReleased` -> 等 500ms -> 补发 `input/change` 事件 -> 点登录。
-
-## 调试
-
-页面简化调试必须注入 JS 到真实浏览器，本地静态解析无法模拟 DOM。优先用 `scan --text-only` 和小段 `exec` 缩小问题范围。
-
-## 排障顺序
-
-1. 先跑最小自检，确认 `agent-browser-cli` 是否可执行。
-2. 若 npm 安装失败，检查当前平台是否有对应二进制包，必要时用 `cargo build --release`。
-3. 若提示无法加载 `config.js` 或清单，检查 `assets/tmwd_cdp_bridge/config.js`。
-4. 若提示没有可用标签页，先打开正常网页，不要只开内部页。
-5. 若扩展没装，加载 `assets/tmwd_cdp_bridge`。
-6. 仍失败时检查 Chrome 扩展后台日志和 `.agent-browser-cli.log`。
+- daemon 未运行、扩展未连接、端口不一致、无可用标签页：看 `references/operations.md`。
+- skill 安装：先 `agent-browser-cli install-skill --dry-run` 展示计划，用户确认后再 `agent-browser-cli install-skill`。
+- 可自动执行的排障命令：`status`、`doctor`、`logs --tail`、`restart`、`stop`、`tabs`。

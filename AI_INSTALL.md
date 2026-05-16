@@ -10,8 +10,8 @@
 2. 先询问我希望把 Chrome 扩展解压到哪个本地目录。
 3. 从 GitHub 最新 Release 下载 `chrome-extensions.zip`，解压到我指定的目录，并指导我在 Chrome 中加载解压后的 `tmwd_cdp_bridge` 扩展目录。
 4. 如果之前已经加载过扩展，必须在 chrome://extensions 里重新加载该扩展，确保最新 `config.js`、`content.js` 和 `background.js` 生效。
-5. 将 skills/agent-browser-cli/SKILL.md 安装到当前 AI 可识别的 skills 目录。
-6. 执行 agent-browser-cli tabs、open 和 status 验证可用。
+5. skill 从 npm 包内置的 `skills/agent-browser-cli` 复制安装，不需要从 GitHub 下载 SKILL.md；先执行 `agent-browser-cli install-skill --dry-run` 展示安装计划，向我确认后再执行 `agent-browser-cli install-skill`。
+6. 执行 agent-browser-cli status、doctor、tabs、open 验证可用。
 7. 如果 npm 平台包暂不支持当前系统，再回退到源码构建：cargo build --release。
 ```
 
@@ -101,33 +101,54 @@ Chrome 至少需要打开一个正常网页标签页，不要只停留在 `about
 
 ## 3. 安装 skill
 
-将仓库中的 `skills/agent-browser-cli/SKILL.md` 安装到 AI 使用的 skills 目录。
+`agent-browser-cli install-skill` 使用 CLI 包内置的 skill 目录作为来源。npm 全局安装时，来源位于 npm 包内部的 `skills/agent-browser-cli`，不会联网，也不会从 GitHub 拉取 `SKILL.md`。源码构建时，来源为仓库内的同名目录。
 
-通用目录示例：
+默认实体安装目录：
 
-```bash
-mkdir -p ~/.agents/skills/agent-browser-cli
-cp skills/agent-browser-cli/SKILL.md ~/.agents/skills/agent-browser-cli/SKILL.md
+```text
+~/.agents/skills/agent-browser-cli
 ```
 
-Codex 默认目录示例：
+Codex、Claude、Kimi CLI、Cursor、Gemini 等目录只创建指向主安装目录的软链接，不复制多份实体文件：
 
-```bash
-mkdir -p ~/.codex/skills/agent-browser-cli
-cp skills/agent-browser-cli/SKILL.md ~/.codex/skills/agent-browser-cli/SKILL.md
+```text
+~/.codex/skills/agent-browser-cli -> ~/.agents/skills/agent-browser-cli
+~/.claude/skills/agent-browser-cli -> ~/.agents/skills/agent-browser-cli
+~/.config/agents/skills/agent-browser-cli -> ~/.agents/skills/agent-browser-cli
+~/.cursor/skills/agent-browser-cli -> ~/.agents/skills/agent-browser-cli
+~/.gemini/skills/agent-browser-cli -> ~/.agents/skills/agent-browser-cli
 ```
 
-如果 AI 使用其它 skills 目录，将 `SKILL.md` 复制到对应的 `agent-browser-cli/SKILL.md`。
+安装前必须先展示真实计划，并让用户确认。dry-run 输出中的“复制内置 skill 目录”就是本次安装的实际来源：
+
+```bash
+agent-browser-cli install-skill --dry-run
+```
+
+确认后再执行：
+
+```bash
+agent-browser-cli install-skill
+```
+
+`--yes` 只适合脚本化安装，不建议默认使用：
+
+```bash
+agent-browser-cli install-skill --yes
+```
+
+安装命令不会覆盖 Codex/Claude/Kimi CLI/Cursor/Gemini 目录下已存在的非软链接实体路径；即使使用 `--yes` 也会跳过并提示用户手动处理。
 
 ## 4. 验证
 
 ```bash
+agent-browser-cli status
+agent-browser-cli doctor
 agent-browser-cli tabs
 agent-browser-cli open https://www.baidu.com
-agent-browser-cli status
 ```
 
-成功时，`tabs` 会返回 `ok: true`，并包含当前 Chrome 标签页数量。
+成功时，`status` 应返回 `healthy: true` 和 `summary: "ready"`；`tabs` 会返回 `ok: true`，并包含当前 Chrome 标签页数量。
 `open` 应能原生新开标签页，不应使用 `exec --monitor` 或 `window.open` 代替。
 
 如果常驻服务需要重载最新代码：
@@ -145,7 +166,13 @@ agent-browser-cli scan --tab <tabId> --text-only
 agent-browser-cli exec --tab <tabId> 'return document.title'
 ```
 
-完整命令和浏览器操作 SOP 见：
+完整命令和浏览器操作 SOP 见安装后的：
+
+```text
+~/.agents/skills/agent-browser-cli/SKILL.md
+```
+
+源码仓库中的对应文件为：
 
 ```text
 skills/agent-browser-cli/SKILL.md

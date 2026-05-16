@@ -148,7 +148,11 @@ async function handle(el) {
     } else if (cmd === 'tabs') {
       resp = await chrome.runtime.sendMessage({ cmd: 'tabs', method: req.method, tabId: req.tabId, allowFocus: req.allowFocus });
     } else if (cmd === 'openTab') {
-      resp = await chrome.runtime.sendMessage({ cmd: 'openTab', url: req.url, active: req.active, allowFocus: req.allowFocus });
+      resp = await chrome.runtime.sendMessage({ cmd: 'openTab', url: req.url, active: req.active, allowFocus: req.allowFocus, groupTitle: req.groupTitle });
+    } else if (cmd === 'closeTab') {
+      resp = await chrome.runtime.sendMessage({ cmd: 'closeTab', tabId: req.tabId });
+    } else if (cmd === 'networkStart' || cmd === 'networkList' || cmd === 'networkDetail' || cmd === 'networkClear' || cmd === 'networkStop' || cmd === 'consoleStart' || cmd === 'consoleList' || cmd === 'consoleClear' || cmd === 'consoleStop' || cmd === 'debugClearAll') {
+      resp = await chrome.runtime.sendMessage(Object.assign({}, req, { cmd }));
     } else {
       resp = { ok: false, error: 'unknown cmd: ' + cmd };
     }

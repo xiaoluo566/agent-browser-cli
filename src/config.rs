@@ -42,6 +42,19 @@ pub fn load_or_create() -> Result<AppConfig> {
     Ok(config)
 }
 
+pub fn load_existing() -> Result<AppConfig> {
+    let path = config_path()?;
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
+    if content.trim().is_empty() {
+        return Err(anyhow!("配置文件为空: {}", path.display()));
+    }
+    let config: AppConfig = serde_json::from_str(&content)
+        .with_context(|| format!("解析配置文件失败: {}", path.display()))?;
+    validate_port(config.extension_port)?;
+    Ok(config)
+}
+
 pub fn save(config: &AppConfig) -> Result<()> {
     validate_port(config.extension_port)?;
     let path = config_path()?;
@@ -63,12 +76,38 @@ pub fn set_extension_port(port: u16) -> Result<AppConfig> {
 }
 
 pub fn config_path() -> Result<PathBuf> {
+    Ok(user_config_dir()?.join("config.json"))
+}
+
+pub fn user_config_dir() -> Result<PathBuf> {
     let home = env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
         .ok_or_else(|| anyhow!("无法定位用户主目录，不能创建 agent-browser-cli 配置文件"))?;
-    Ok(PathBuf::from(home)
-        .join(".agent-browser-cli")
-        .join("config.json"))
+    Ok(PathBuf::from(home).join(".agent-browser-cli"))
+}
+
+pub fn log_dir() -> Result<PathBuf> {
+    Ok(user_config_dir()?.join("logs"))
+}
+
+pub fn daemon_log_path() -> Result<PathBuf> {
+    Ok(log_dir()?.join("daemon.log"))
+}
+
+pub fn ensure_log_file() -> Result<PathBuf> {
+    let path = daemon_log_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("创建日志目录失败: {}", parent.display()))?;
+    }
+    if !path.exists() {
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("创建日志文件失败: {}", path.display()))?;
+    }
+    Ok(path)
 }
 
 fn validate_port(port: u16) -> Result<()> {

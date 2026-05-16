@@ -46,6 +46,66 @@ pub struct ExecResult {
     pub new_tabs: Option<Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RectInfo {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElementDomInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub input_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readonly: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rect: Option<RectInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dom_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElementRef {
+    pub ref_id: String,
+    pub backend_dom_node_id: i64,
+    pub index: usize,
+    pub role: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dom: Option<ElementDomInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SnapshotCache {
+    pub generation: u64,
+    pub url: String,
+    pub refs: HashMap<String, ElementRef>,
+}
+
 #[derive(Debug)]
 pub struct PendingExec {
     pub delivered_at: Option<Instant>,
@@ -55,6 +115,7 @@ pub struct PendingExec {
 #[derive(Default)]
 pub struct DriverState {
     pub sessions: HashMap<String, Session>,
+    pub snapshots: HashMap<String, SnapshotCache>,
     pub pending: HashMap<String, PendingExec>,
     pub default_session_id: Option<String>,
     pub latest_session_id: Option<String>,

@@ -10,11 +10,11 @@ Browser perception · Page control · Chrome session reuse · CDP · Conditional
   <a href="https://github.com/sleepinginsummer/agent-browser-cli"><img src="https://img.shields.io/badge/CLI-agentbrowsercli-2ea44f" alt="CLI agentbrowsercli"></a>
   <a href="https://github.com/sleepinginsummer/agent-browser-cli/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="License MIT"></a>
   <a href="https://github.com/sleepinginsummer/agent-browser-cli"><img src="https://img.shields.io/badge/sys-win%2Fmac%2Flinux-0078D6?labelColor=0078D6&color=C0C0C0" alt="sys win/mac/linux"></a>
-  <a href="https://github.com/sleepinginsummer/agent-browser-cli/releases"><img src="https://img.shields.io/badge/release-v0.2.9-blue" alt="release v0.2.9"></a>
+  <a href="https://github.com/sleepinginsummer/agent-browser-cli/releases"><img src="https://img.shields.io/badge/release-v0.3.1--beta.1-orange" alt="release v0.3.1-beta.1"></a>
   <a href="https://github.com/sleepinginsummer/agent-browser-cli/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
 </p>
 
-[AI One-Line Install](#ai-one-line-install) · [Manual Installation](#manual-installation) · [Chrome Extension](#chrome-extension) · [Update](#update) · [Uninstall](#uninstall) · [Friendly Links](#friendly-links)
+[AI One-Line Install](#ai-one-line-install) · [Manual Installation](#manual-installation) · [Chrome Extension](#chrome-extension) · [Update](#update) · [Changelog](CHANGELOG.md) · [Uninstall](#uninstall) · [Friendly Links](#friendly-links)
 
 [中文](README.md) | English
 
@@ -26,7 +26,7 @@ This project is not Selenium or Playwright. It is better suited for helping agen
 
 ## Project Info
 
-- Current version: `0.2.9`
+- Current version: `0.3.1-beta.1`
 - Supported platforms: Windows (including WSL) / Mac / Linux
 - Browser: Chrome, with the `assets/tmwd_cdp_bridge` extension loaded
 - Linux prerequisite: the local Chrome / Chromium build must support loading extensions
@@ -186,6 +186,8 @@ agent-browser-cli tabs
 ```
 
 ## Update
+
+For the full version history, see [CHANGELOG.md](./CHANGELOG.md).
 
 AI one-line update:
 

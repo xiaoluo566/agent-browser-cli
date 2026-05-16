@@ -29,7 +29,8 @@ function resolveBinary() {
 }
 
 const bin = resolveBinary();
-const result = spawnSync(bin, process.argv.slice(2), { stdio: "inherit" });
+const env = { ...process.env, AGENT_BROWSER_CLI_PACKAGE_DIR: path.resolve(__dirname, "..") };
+const result = spawnSync(bin, process.argv.slice(2), { stdio: "inherit", env });
 if (result.error) {
   console.error(result.error.message);
   process.exit(1);

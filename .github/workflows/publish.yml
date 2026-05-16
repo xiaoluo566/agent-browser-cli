@@ -80,7 +80,12 @@ jobs:
           set -euo pipefail
           PACKAGE_NAME=$(node -p "require('./package.json').name")
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
-          if npm publish --access public; then
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            NPM_TAG="${NPM_TAG:-beta}"
+          else
+            NPM_TAG="${NPM_TAG:-latest}"
+          fi
+          if npm publish --access public --tag "${NPM_TAG}"; then
             exit 0
           fi
           if [ "$(npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version 2>/dev/null || true)" = "${PACKAGE_VERSION}" ]; then
@@ -126,7 +131,12 @@ jobs:
           set -euo pipefail
           PACKAGE_NAME=$(node -p "require('./package.json').name")
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
-          if npm publish --access public; then
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            NPM_TAG="${NPM_TAG:-beta}"
+          else
+            NPM_TAG="${NPM_TAG:-latest}"
+          fi
+          if npm publish --access public --tag "${NPM_TAG}"; then
             exit 0
           fi
           if [ "$(npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version 2>/dev/null || true)" = "${PACKAGE_VERSION}" ]; then
@@ -210,8 +220,13 @@ jobs:
             else
               printf '%s\n' "${DEFAULT_NOTES}" > release-notes.md
             fi
+            release_flags=()
+            if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+              release_flags+=(--prerelease)
+            fi
             gh release create "${GITHUB_REF_NAME}" "${release_assets[@]}" \
               --repo "${GITHUB_REPOSITORY}" \
               --title "${GITHUB_REF_NAME}" \
-              --notes-file release-notes.md
+              --notes-file release-notes.md \
+              "${release_flags[@]}"
           fi

@@ -1,4 +1,7 @@
-use crate::protocol::{DriverState, ExecResult, Session, TabInfo, WsIncoming};
+use crate::protocol::{
+    DriverState, ElementDomInfo, ElementRef, ExecResult, RectInfo, Session, SnapshotCache, TabInfo,
+    WsIncoming,
+};
 use crate::{config, html};
 use anyhow::{anyhow, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -7,9 +10,12 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::fs;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
@@ -61,6 +67,138 @@ struct OpenRequest {
     #[serde(default = "default_active")]
     active: bool,
     switch_tab_id: Option<String>,
+    session: Option<String>,
+    group_title: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CloseRequest {
+    tab_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SnapshotRequest {
+    switch_tab_id: Option<String>,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_snapshot_limit")]
+    limit: usize,
+    #[serde(default)]
+    details: bool,
+    #[serde(default = "default_high_level_timeout")]
+    timeout: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct TargetActionRequest {
+    target: String,
+    switch_tab_id: Option<String>,
+    #[serde(default)]
+    monitor: bool,
+    wait_js: Option<String>,
+    #[serde(default = "default_wait_timeout")]
+    wait_timeout: f64,
+    #[serde(default = "default_wait_interval")]
+    wait_interval: f64,
+    #[serde(default = "default_high_level_timeout")]
+    timeout: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct FillRequest {
+    target: String,
+    #[serde(default)]
+    value: String,
+    switch_tab_id: Option<String>,
+    #[serde(default)]
+    append: bool,
+    #[serde(default)]
+    clear: bool,
+    #[serde(default)]
+    has_value: bool,
+    #[serde(default)]
+    monitor: bool,
+    wait_js: Option<String>,
+    #[serde(default = "default_wait_timeout")]
+    wait_timeout: f64,
+    #[serde(default = "default_wait_interval")]
+    wait_interval: f64,
+    #[serde(default = "default_high_level_timeout")]
+    timeout: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SendKeysRequest {
+    keys: String,
+    target: Option<String>,
+    switch_tab_id: Option<String>,
+    #[serde(default)]
+    monitor: bool,
+    wait_js: Option<String>,
+    #[serde(default = "default_wait_timeout")]
+    wait_timeout: f64,
+    #[serde(default = "default_wait_interval")]
+    wait_interval: f64,
+    #[serde(default = "default_high_level_timeout")]
+    timeout: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScreenshotRequest {
+    switch_tab_id: Option<String>,
+    target: Option<String>,
+    selector: Option<String>,
+    out: Option<PathBuf>,
+    #[serde(default = "default_screenshot_format")]
+    format: String,
+    quality: Option<u8>,
+    #[serde(default)]
+    full_page: bool,
+    #[serde(default = "default_high_level_timeout")]
+    timeout: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SavePdfRequest {
+    switch_tab_id: Option<String>,
+    out: Option<PathBuf>,
+    #[serde(default = "default_pdf_paper")]
+    paper: String,
+    #[serde(default)]
+    landscape: bool,
+    #[serde(default = "default_pdf_scale")]
+    scale: f64,
+    #[serde(default = "default_true")]
+    print_background: bool,
+    #[serde(default = "default_high_level_timeout")]
+    timeout: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct TabRequest {
+    switch_tab_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NetworkListRequest {
+    switch_tab_id: Option<String>,
+    filter: Option<String>,
+    #[serde(default = "default_debug_list_limit")]
+    limit: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct NetworkDetailRequest {
+    switch_tab_id: Option<String>,
+    request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConsoleListRequest {
+    switch_tab_id: Option<String>,
+    level: Option<String>,
+    #[serde(default = "default_debug_list_limit")]
+    limit: usize,
 }
 
 fn default_active() -> bool {
@@ -73,6 +211,34 @@ fn default_wait_timeout() -> f64 {
 
 fn default_wait_interval() -> f64 {
     0.1
+}
+
+fn default_snapshot_limit() -> usize {
+    200
+}
+
+fn default_high_level_timeout() -> f64 {
+    30.0
+}
+
+fn default_screenshot_format() -> String {
+    "png".to_string()
+}
+
+fn default_pdf_paper() -> String {
+    "a4".to_string()
+}
+
+fn default_pdf_scale() -> f64 {
+    1.0
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_debug_list_limit() -> usize {
+    100
 }
 
 pub async fn run_daemon() -> Result<()> {
@@ -106,6 +272,23 @@ pub async fn run_daemon() -> Result<()> {
         .route("/scan", post(scan))
         .route("/exec", post(exec))
         .route("/open", post(open_tab))
+        .route("/close", post(close))
+        .route("/snapshot", post(snapshot))
+        .route("/click", post(click))
+        .route("/fill", post(fill))
+        .route("/send-keys", post(send_keys))
+        .route("/mouse-click", post(mouse_click))
+        .route("/screenshot", post(screenshot))
+        .route("/save-pdf", post(save_pdf))
+        .route("/network/start", post(network_start))
+        .route("/network/list", post(network_list))
+        .route("/network/detail", post(network_detail))
+        .route("/network/clear", post(network_clear))
+        .route("/network/stop", post(network_stop))
+        .route("/console/start", post(console_start))
+        .route("/console/list", post(console_list))
+        .route("/console/clear", post(console_clear))
+        .route("/console/stop", post(console_stop))
         .route("/shutdown", post(shutdown))
         .with_state(state.clone())
         .layer(CorsLayer::permissive());
@@ -113,9 +296,11 @@ pub async fn run_daemon() -> Result<()> {
     let addr: SocketAddr = format!("{HOST}:{API_PORT}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("agent-browser-cli rust server listening on http://{addr}");
+    let cleanup_state = state.clone();
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             let _ = shutdown_rx.recv().await;
+            cleanup_on_shutdown(&cleanup_state).await;
         })
         .await?;
     Ok(())
@@ -144,6 +329,7 @@ async fn monitor_idle_shutdown(state: AppState) {
                 "agent-browser-cli daemon idle for {}s, shutting down",
                 idle_for.as_secs()
             );
+            cleanup_on_shutdown(&state).await;
             let _ = state.shutdown.send(());
             break;
         }
@@ -267,7 +453,7 @@ async fn root() -> &'static str {
 async fn health(State(state): State<AppState>) -> Json<Value> {
     let active_tabs_count = active_tabs(&state, false).await.len();
     let extension_connected = has_extension_connection(&state).await;
-    let ready = active_tabs_count > 0;
+    let ready = extension_connected && active_tabs_count > 0;
     let uptime = state
         .started_at
         .elapsed()
@@ -275,11 +461,11 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         .unwrap_or_default();
     let idle_for = state.last_activity.lock().await.elapsed().as_secs_f64();
     let ttl = IDLE_SHUTDOWN_TTL.as_secs_f64();
-    let configured_extension_port = config::load_or_create()
+    let configured_extension_port = config::load_existing()
         .map(|config| config.extension_port)
         .unwrap_or(state.extension_port);
     Json(json!({
-        "ok": ready,
+        "ok": true,
         "running": true,
         "ready": ready,
         "ports": {
@@ -341,9 +527,44 @@ async fn exec(State(state): State<AppState>, Json(req): Json<ExecRequest>) -> Js
 
 async fn open_tab(State(state): State<AppState>, Json(req): Json<OpenRequest>) -> Json<Value> {
     touch(&state).await;
-    let payload = json!({ "cmd": "openTab", "url": normalize_url(&req.url), "active": req.active })
-        .to_string();
+    let group_title = req.group_title.or(req.session);
+    let payload = json!({
+        "cmd": "openTab",
+        "url": normalize_url(&req.url),
+        "active": req.active,
+        "groupTitle": group_title,
+    })
+    .to_string();
     let result = execute_page_js(&state, &payload, req.switch_tab_id, true).await;
+    Json(match result {
+        Ok(value) => json!({ "ok": true, "result": value }),
+        Err(err) => json!({ "ok": false, "error": err.to_string() }),
+    })
+}
+
+async fn close(State(state): State<AppState>, Json(req): Json<CloseRequest>) -> Json<Value> {
+    touch(&state).await;
+    let tab_id = req.tab_id;
+    let payload = json!({
+        "cmd": "closeTab",
+        "tabId": tab_id.parse::<i64>().unwrap_or_default(),
+    })
+    .to_string();
+    let result = execute_page_js(&state, &payload, Some(tab_id.clone()), true).await;
+    {
+        let mut driver = state.driver.lock().await;
+        driver.sessions.remove(&tab_id);
+        driver.snapshots.remove(&tab_id);
+        driver
+            .active_exec_sessions
+            .retain(|_, session_id| session_id != &tab_id);
+        if driver.default_session_id.as_deref() == Some(&tab_id) {
+            driver.default_session_id = driver.latest_session_id.clone().filter(|id| id != &tab_id);
+        }
+        if driver.latest_session_id.as_deref() == Some(&tab_id) {
+            driver.latest_session_id = None;
+        }
+    }
     Json(match result {
         Ok(value) => json!({ "ok": true, "result": value }),
         Err(err) => json!({ "ok": false, "error": err.to_string() }),
@@ -352,8 +573,57 @@ async fn open_tab(State(state): State<AppState>, Json(req): Json<OpenRequest>) -
 
 async fn shutdown(State(state): State<AppState>) -> Json<Value> {
     touch(&state).await;
+    let cleanup = cleanup_on_shutdown(&state).await;
     let _ = state.shutdown.send(());
-    Json(json!({ "ok": true, "status": "shutdown_requested" }))
+    Json(json!({
+        "ok": true,
+        "status": "shutdown_requested",
+        "cleanup": cleanup
+    }))
+}
+
+async fn cleanup_on_shutdown(state: &AppState) -> Value {
+    let (snapshot_count, pending_count, active_exec_count, sessions) = {
+        let mut driver = state.driver.lock().await;
+        let snapshot_count = driver.snapshots.len();
+        let pending_count = driver.pending.len();
+        let active_exec_count = driver.active_exec_sessions.len();
+        let sessions: Vec<(String, tokio::sync::mpsc::UnboundedSender<String>)> = driver
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.is_active())
+            .map(|(id, session)| (id.clone(), session.sender.clone()))
+            .collect();
+        driver.snapshots.clear();
+        driver.pending.clear();
+        driver.active_exec_sessions.clear();
+        driver.acked.clear();
+        (snapshot_count, pending_count, active_exec_count, sessions)
+    };
+
+    let mut plugin_results = Vec::new();
+    for (tab_id, sender) in sessions {
+        let exec_id = uuid::Uuid::new_v4().to_string();
+        let payload = json!({
+            "id": exec_id,
+            "code": json!({ "cmd": "debugClearAll" }).to_string(),
+            "tabId": tab_id.parse::<i64>().unwrap_or_default()
+        })
+        .to_string();
+        let ok = sender.send(payload).is_ok();
+        plugin_results.push(json!({ "tab_id": tab_id, "sent": ok }));
+    }
+
+    json!({
+        "daemon": {
+            "snapshots": snapshot_count,
+            "pending": pending_count,
+            "active_exec_sessions": active_exec_count
+        },
+        "plugin": {
+            "sent": plugin_results
+        }
+    })
 }
 
 async fn active_tabs(state: &AppState, wait_ready: bool) -> Vec<TabInfo> {
@@ -679,4 +949,1860 @@ async fn not_found() -> (StatusCode, Json<Value>) {
         StatusCode::NOT_FOUND,
         Json(json!({ "ok": false, "error": "not found" })),
     )
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CdpCallResult {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperationKind {
+    Click,
+    Fill,
+    MouseClick,
+}
+
+#[derive(Debug, Clone)]
+struct OperationOptions {
+    monitor: bool,
+    wait_js: Option<String>,
+    wait_timeout: f64,
+    wait_interval: f64,
+    timeout: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct AxNode {
+    #[serde(rename = "nodeId")]
+    node_id: String,
+    #[serde(rename = "childIds", default)]
+    child_ids: Vec<String>,
+    #[serde(rename = "backendDOMNodeId")]
+    backend_dom_node_id: Option<i64>,
+    role: Option<AxValue>,
+    name: Option<AxValue>,
+    value: Option<AxValue>,
+    description: Option<AxValue>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AxValue {
+    value: Option<Value>,
+    #[serde(rename = "type")]
+    value_type: Option<String>,
+}
+
+async fn snapshot(State(state): State<AppState>, Json(req): Json<SnapshotRequest>) -> Json<Value> {
+    touch(&state).await;
+    Json(match snapshot_page(&state, req).await {
+        Ok(value) => json!({ "ok": true, "result": value }),
+        Err(err) => json!({ "ok": false, "error": err.to_string() }),
+    })
+}
+
+async fn click(State(state): State<AppState>, Json(req): Json<TargetActionRequest>) -> Json<Value> {
+    touch(&state).await;
+    let options = OperationOptions {
+        monitor: req.monitor,
+        wait_js: req.wait_js,
+        wait_timeout: req.wait_timeout,
+        wait_interval: req.wait_interval,
+        timeout: req.timeout,
+    };
+    Json(
+        match run_target_operation(
+            &state,
+            OperationKind::Click,
+            req.switch_tab_id,
+            &req.target,
+            None,
+            options,
+        )
+        .await
+        {
+            Ok(value) => json!({ "ok": true, "result": value }),
+            Err(err) => json!({ "ok": false, "error": err.to_string() }),
+        },
+    )
+}
+
+async fn fill(State(state): State<AppState>, Json(req): Json<FillRequest>) -> Json<Value> {
+    touch(&state).await;
+    if req.clear && req.has_value {
+        return Json(json!({ "ok": false, "error": "fill: --clear 不能和 value 同时使用" }));
+    }
+    if req.clear && req.append {
+        return Json(json!({ "ok": false, "error": "fill: --clear 不能和 --append 同时使用" }));
+    }
+    if !req.clear && !req.has_value {
+        return Json(
+            json!({ "ok": false, "error": "fill: value is required unless --clear is used" }),
+        );
+    }
+    let value = if req.clear { String::new() } else { req.value };
+    let options = OperationOptions {
+        monitor: req.monitor,
+        wait_js: req.wait_js,
+        wait_timeout: req.wait_timeout,
+        wait_interval: req.wait_interval,
+        timeout: req.timeout,
+    };
+    let payload = json!({ "value": value, "append": req.append, "clear": req.clear });
+    Json(
+        match run_target_operation(
+            &state,
+            OperationKind::Fill,
+            req.switch_tab_id,
+            &req.target,
+            Some(payload),
+            options,
+        )
+        .await
+        {
+            Ok(value) => json!({ "ok": true, "result": value }),
+            Err(err) => json!({ "ok": false, "error": err.to_string() }),
+        },
+    )
+}
+
+async fn mouse_click(
+    State(state): State<AppState>,
+    Json(req): Json<TargetActionRequest>,
+) -> Json<Value> {
+    touch(&state).await;
+    let options = OperationOptions {
+        monitor: req.monitor,
+        wait_js: req.wait_js,
+        wait_timeout: req.wait_timeout,
+        wait_interval: req.wait_interval,
+        timeout: req.timeout,
+    };
+    Json(
+        match run_target_operation(
+            &state,
+            OperationKind::MouseClick,
+            req.switch_tab_id,
+            &req.target,
+            None,
+            options,
+        )
+        .await
+        {
+            Ok(value) => json!({ "ok": true, "result": value }),
+            Err(err) => json!({ "ok": false, "error": err.to_string() }),
+        },
+    )
+}
+
+async fn send_keys(State(state): State<AppState>, Json(req): Json<SendKeysRequest>) -> Json<Value> {
+    touch(&state).await;
+    let options = OperationOptions {
+        monitor: req.monitor,
+        wait_js: req.wait_js,
+        wait_timeout: req.wait_timeout,
+        wait_interval: req.wait_interval,
+        timeout: req.timeout,
+    };
+    let payload = json!({ "keys": req.keys, "target": req.target });
+    Json(
+        match run_send_keys_operation(&state, req.switch_tab_id, payload, options).await {
+            Ok(value) => json!({ "ok": true, "result": value }),
+            Err(err) => json!({ "ok": false, "error": err.to_string() }),
+        },
+    )
+}
+
+async fn snapshot_page(state: &AppState, req: SnapshotRequest) -> Result<Value> {
+    let limit = req.limit.clamp(1, 1000);
+    let tab_id = select_tab(state, req.switch_tab_id).await?;
+    let timeout = Duration::from_secs_f64(req.timeout.max(0.1));
+    let tabs = active_tabs(state, true).await;
+    let tab = tabs
+        .iter()
+        .find(|tab| tab.id == tab_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("snapshot: tab {tab_id} is not active"))?;
+    let ax = cdp_call(
+        state,
+        &tab_id,
+        "Accessibility.getFullAXTree",
+        json!({}),
+        timeout,
+    )
+    .await?;
+    if !ax.ok {
+        return Err(anyhow!(ax.error.unwrap_or_else(|| {
+            "snapshot: Accessibility.getFullAXTree failed".to_string()
+        })));
+    }
+    let nodes_value = ax
+        .data
+        .and_then(|v| v.get("nodes").cloned())
+        .ok_or_else(|| anyhow!("snapshot: CDP response missing nodes"))?;
+    let nodes: Vec<AxNode> = serde_json::from_value(nodes_value)?;
+    let mut builder = SnapshotBuilder::new(req.offset, limit, req.details);
+    let tree = builder.build(nodes);
+    let refs_for_details: Vec<_> = builder
+        .refs
+        .values()
+        .filter(|entry| entry.index >= req.offset && entry.index < req.offset + limit)
+        .cloned()
+        .collect();
+    let mut all_refs = builder.refs;
+    let detail_map =
+        collect_dom_details(state, &tab_id, &refs_for_details, req.details, timeout).await;
+    for (ref_id, detail) in detail_map {
+        if let Some(entry) = all_refs.get_mut(&ref_id) {
+            entry.dom = Some(detail);
+        }
+    }
+    let tree = if req.details {
+        attach_details_to_tree(tree, &all_refs)
+    } else {
+        tree
+    };
+    let total = all_refs.len();
+    let returned = all_refs
+        .values()
+        .filter(|entry| entry.index >= req.offset && entry.index < req.offset + limit)
+        .count();
+    {
+        let mut driver = state.driver.lock().await;
+        let generation = driver
+            .snapshots
+            .get(&tab_id)
+            .map(|cache| cache.generation + 1)
+            .unwrap_or(1);
+        driver.snapshots.insert(
+            tab_id.clone(),
+            SnapshotCache {
+                generation,
+                url: tab.url.clone(),
+                refs: all_refs,
+            },
+        );
+    }
+    let has_more = req.offset + returned < total;
+    Ok(json!({
+        "status": "success",
+        "url": tab.url,
+        "title": tab.title,
+        "tab_id": tab_id,
+        "tree": tree,
+        "pagination": {
+            "total_operable": total,
+            "offset": req.offset,
+            "limit": limit,
+            "returned": returned,
+            "has_more": has_more,
+            "next_offset": if has_more { Some(req.offset + limit) } else { None::<usize> }
+        }
+    }))
+}
+
+struct SnapshotBuilder {
+    offset: usize,
+    limit: usize,
+    operable_seen: usize,
+    refs: HashMap<String, ElementRef>,
+    nodes: HashMap<String, AxNode>,
+}
+
+impl SnapshotBuilder {
+    fn new(offset: usize, limit: usize, _details: bool) -> Self {
+        Self {
+            offset,
+            limit,
+            operable_seen: 0,
+            refs: HashMap::new(),
+            nodes: HashMap::new(),
+        }
+    }
+
+    fn build(&mut self, nodes: Vec<AxNode>) -> Vec<Value> {
+        let mut child_ids = std::collections::HashSet::new();
+        for node in &nodes {
+            for child_id in &node.child_ids {
+                child_ids.insert(child_id.clone());
+            }
+        }
+        let mut roots: Vec<String> = nodes
+            .iter()
+            .filter(|node| !child_ids.contains(&node.node_id))
+            .map(|node| node.node_id.clone())
+            .collect();
+        if roots.is_empty() {
+            if let Some(first) = nodes.first() {
+                roots.push(first.node_id.clone());
+            }
+        }
+        self.nodes = nodes
+            .into_iter()
+            .map(|node| (node.node_id.clone(), node))
+            .collect();
+        roots
+            .iter()
+            .filter_map(|id| self.format_node(id))
+            .flat_map(|value| match value {
+                Value::Array(items) => items,
+                other => vec![other],
+            })
+            .collect()
+    }
+
+    fn format_node(&mut self, id: &str) -> Option<Value> {
+        let (role, name, value, description, backend_dom_node_id, child_ids) = {
+            let node = self.nodes.get(id)?;
+            (
+                ax_string(&node.role),
+                ax_string(&node.name),
+                ax_string(&node.value),
+                ax_string(&node.description),
+                node.backend_dom_node_id,
+                node.child_ids.clone(),
+            )
+        };
+        let mut children = Vec::new();
+        for child_id in child_ids {
+            if let Some(child) = self.format_node(&child_id) {
+                match child {
+                    Value::Array(items) => children.extend(items),
+                    other => children.push(other),
+                }
+            }
+        }
+        let role_str = role.unwrap_or_default();
+        let skip_role = role_str.is_empty() || role_str == "none" || role_str == "generic";
+        let operable = is_operable_role(&role_str) && backend_dom_node_id.is_some();
+        let mut obj = serde_json::Map::new();
+        obj.insert("role".to_string(), json!(role_str));
+        if let Some(name) = non_empty(name) {
+            obj.insert("name".to_string(), json!(truncate_text(&name, 160)));
+        }
+        if let Some(value) = non_empty(value) {
+            obj.insert("value".to_string(), json!(truncate_text(&value, 160)));
+        }
+        if let Some(description) = non_empty(description.clone()) {
+            obj.insert(
+                "description".to_string(),
+                json!(truncate_text(&description, 160)),
+            );
+        }
+        let mut include_self = false;
+        if operable {
+            self.operable_seen += 1;
+            let index = self.operable_seen - 1;
+            let ref_id = format!("@e{}", self.operable_seen);
+            self.refs.insert(
+                ref_id.clone(),
+                ElementRef {
+                    ref_id: ref_id.clone(),
+                    backend_dom_node_id: backend_dom_node_id.unwrap_or_default(),
+                    index,
+                    role: role_str.clone(),
+                    name: obj
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    value: obj.get("value").and_then(Value::as_str).map(str::to_string),
+                    description,
+                    dom: None,
+                },
+            );
+            if index >= self.offset && index < self.offset + self.limit {
+                include_self = true;
+                obj.insert("ref".to_string(), json!(ref_id));
+            }
+        }
+        if skip_role {
+            if children.is_empty() {
+                None
+            } else if children.len() == 1 {
+                children.into_iter().next()
+            } else {
+                Some(Value::Array(children))
+            }
+        } else {
+            if !children.is_empty() {
+                obj.insert("children".to_string(), Value::Array(children));
+            }
+            if include_self || obj.contains_key("children") || role_is_context(&role_str) {
+                Some(Value::Object(obj))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn attach_details_to_tree(mut tree: Vec<Value>, refs: &HashMap<String, ElementRef>) -> Vec<Value> {
+    for item in &mut tree {
+        attach_details_to_node(item, refs);
+    }
+    tree
+}
+
+fn attach_details_to_node(node: &mut Value, refs: &HashMap<String, ElementRef>) {
+    let Some(obj) = node.as_object_mut() else {
+        return;
+    };
+    if let Some(ref_id) = obj.get("ref").and_then(Value::as_str) {
+        if let Some(entry) = refs.get(ref_id).and_then(|entry| entry.dom.as_ref()) {
+            if let Ok(Value::Object(map)) = serde_json::to_value(entry) {
+                for (key, value) in map {
+                    if !value.is_null() {
+                        obj.insert(key, value);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(children) = obj.get_mut("children").and_then(Value::as_array_mut) {
+        for child in children {
+            attach_details_to_node(child, refs);
+        }
+    }
+}
+
+async fn collect_dom_details(
+    state: &AppState,
+    tab_id: &str,
+    refs: &[ElementRef],
+    include_errors: bool,
+    timeout: Duration,
+) -> HashMap<String, ElementDomInfo> {
+    let mut map = HashMap::new();
+    for entry in refs {
+        let detail = match element_dom_info(state, tab_id, entry.backend_dom_node_id, timeout).await
+        {
+            Ok(value) => value,
+            Err(err) => ElementDomInfo {
+                tag: None,
+                text: None,
+                placeholder: None,
+                input_type: None,
+                href: None,
+                disabled: None,
+                readonly: None,
+                checked: None,
+                selected: None,
+                rect: None,
+                selector: None,
+                visible: None,
+                dom_error: include_errors.then(|| err.to_string()),
+            },
+        };
+        map.insert(entry.ref_id.clone(), detail);
+    }
+    map
+}
+
+async fn element_dom_info(
+    state: &AppState,
+    tab_id: &str,
+    backend_dom_node_id: i64,
+    timeout: Duration,
+) -> Result<ElementDomInfo> {
+    let script = r#"function() {
+      const el = this;
+      const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+      const style = el.ownerDocument.defaultView.getComputedStyle(el);
+      const visible = !!rect && rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      function cssPath(node) {
+        if (!node || node.nodeType !== 1) return '';
+        if (node.id) return '#' + CSS.escape(node.id);
+        const parts = [];
+        let cur = node;
+        while (cur && cur.nodeType === 1 && parts.length < 5) {
+          let part = cur.localName;
+          if (cur.classList && cur.classList.length) part += '.' + [...cur.classList].slice(0, 2).map(c => CSS.escape(c)).join('.');
+          const parent = cur.parentElement;
+          if (parent) {
+            const same = [...parent.children].filter(c => c.localName === cur.localName);
+            if (same.length > 1) part += `:nth-of-type(${same.indexOf(cur) + 1})`;
+          }
+          parts.unshift(part);
+          cur = parent;
+        }
+        return parts.join(' > ');
+      }
+      const text = (el.innerText || el.textContent || '').trim().slice(0, 160);
+      return {
+        tag: el.tagName || '', text,
+        placeholder: el.getAttribute && el.getAttribute('placeholder') || undefined,
+        type: el.getAttribute && (el.getAttribute('type') || undefined),
+        href: el.href ? String(el.href).slice(0, 300) : undefined,
+        disabled: !!el.disabled,
+        readonly: !!el.readOnly,
+        checked: typeof el.checked === 'boolean' ? el.checked : undefined,
+        selected: typeof el.selected === 'boolean' ? el.selected : undefined,
+        rect: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : undefined,
+        selector: cssPath(el), visible
+      };
+    }"#;
+    let value = batch_cdp_call(
+        state,
+        tab_id,
+        vec![
+            json!({ "cmd": "cdp", "method": "DOM.resolveNode", "params": { "backendNodeId": backend_dom_node_id } }),
+            json!({ "cmd": "cdp", "method": "Runtime.callFunctionOn", "params": { "objectId": "$0.object.objectId", "functionDeclaration": script, "returnByValue": true } }),
+        ],
+        timeout,
+    )
+    .await?;
+    let value = value
+        .get("results")
+        .and_then(Value::as_array)
+        .and_then(|items| items.get(1))
+        .or_else(|| value.as_array().and_then(|items| items.get(1)))
+        .and_then(|data| data.get("result").and_then(|r| r.get("value")).cloned())
+        .ok_or_else(|| anyhow!("DOM detail response missing value"))?;
+    let rect = value
+        .get("rect")
+        .and_then(|rect| serde_json::from_value::<RectInfo>(rect.clone()).ok());
+    Ok(ElementDomInfo {
+        tag: value.get("tag").and_then(Value::as_str).map(str::to_string),
+        text: value
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        placeholder: value
+            .get("placeholder")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        input_type: value
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        href: value
+            .get("href")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        disabled: value.get("disabled").and_then(Value::as_bool),
+        readonly: value.get("readonly").and_then(Value::as_bool),
+        checked: value.get("checked").and_then(Value::as_bool),
+        selected: value.get("selected").and_then(Value::as_bool),
+        rect,
+        selector: value
+            .get("selector")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        visible: value.get("visible").and_then(Value::as_bool),
+        dom_error: None,
+    })
+}
+
+async fn run_target_operation(
+    state: &AppState,
+    kind: OperationKind,
+    switch_tab_id: Option<String>,
+    target: &str,
+    payload: Option<Value>,
+    options: OperationOptions,
+) -> Result<Value> {
+    let tab_id = select_tab(state, switch_tab_id).await?;
+    let before = if options.monitor {
+        get_html(state, false, 9_999_999, false).await.ok()
+    } else {
+        None
+    };
+    let timeout = Duration::from_secs_f64(options.timeout.max(0.1));
+    let object_id = resolve_target_object(state, &tab_id, target, timeout).await?;
+    let operation = match kind {
+        OperationKind::Click => dom_click(state, &tab_id, &object_id, timeout).await?,
+        OperationKind::Fill => {
+            dom_fill(
+                state,
+                &tab_id,
+                &object_id,
+                payload.unwrap_or_else(|| json!({})),
+                timeout,
+            )
+            .await?
+        }
+        OperationKind::MouseClick => dom_mouse_click(state, &tab_id, &object_id, timeout).await?,
+    };
+    finish_operation(state, tab_id, operation, before, options).await
+}
+
+async fn run_send_keys_operation(
+    state: &AppState,
+    switch_tab_id: Option<String>,
+    payload: Value,
+    options: OperationOptions,
+) -> Result<Value> {
+    let tab_id = select_tab(state, switch_tab_id).await?;
+    let before = if options.monitor {
+        get_html(state, false, 9_999_999, false).await.ok()
+    } else {
+        None
+    };
+    let timeout = Duration::from_secs_f64(options.timeout.max(0.1));
+    if let Some(target) = payload.get("target").and_then(Value::as_str) {
+        let object_id = resolve_target_object(state, &tab_id, target, timeout).await?;
+        focus_object(state, &tab_id, &object_id, timeout).await?;
+    }
+    let operation = dispatch_keys(
+        state,
+        &tab_id,
+        payload
+            .get("keys")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        timeout,
+    )
+    .await?;
+    finish_operation(state, tab_id, operation, before, options).await
+}
+
+async fn finish_operation(
+    state: &AppState,
+    tab_id: String,
+    operation: Value,
+    before: Option<String>,
+    options: OperationOptions,
+) -> Result<Value> {
+    let mut result = json!({ "status": "success", "tab_id": tab_id, "operation": operation });
+    if let Some(wait_js) = options.wait_js.as_deref() {
+        let wait =
+            wait_for_js_condition(state, wait_js, options.wait_timeout, options.wait_interval)
+                .await?;
+        if !wait.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+            return Err(anyhow!(json!({ "error": format!("wait-js timeout after {}s", options.wait_timeout), "operation": result["operation"].clone(), "wait": wait }).to_string()));
+        }
+        result["wait"] = wait;
+    }
+    if let Some(before_html) = before {
+        match get_html(state, false, 9_999_999, false).await {
+            Ok(after) => result["change"] = html::changed_elements(&before_html, &after),
+            Err(err) => result["monitor"] = json!({ "ok": false, "error": err.to_string() }),
+        }
+    }
+    Ok(result)
+}
+
+async fn wait_for_js_condition(
+    state: &AppState,
+    wait_js: &str,
+    timeout: f64,
+    interval: f64,
+) -> Result<Value> {
+    let script = format!(
+        r#"
+const __waitCode = {wait_json};
+const __deadline = Date.now() + {timeout_ms};
+const __interval = {interval_ms};
+const AsyncFunction = Object.getPrototypeOf(async function(){{}}).constructor;
+async function __run(code) {{
+  const trimmed = String(code || '').trim();
+  if (/^return\b/.test(trimmed)) return await (new AsyncFunction(trimmed))();
+  const value = eval(trimmed);
+  return value instanceof Promise ? await value : value;
+}}
+let value = null, error = null, ok = false;
+while (Date.now() <= __deadline) {{
+  try {{ value = await __run(__waitCode); error = null; if (value) {{ ok = true; break; }} }}
+  catch (e) {{ error = e.message || String(e); }}
+  await new Promise(resolve => setTimeout(resolve, __interval));
+}}
+return {{ ok, matched: ok, value, error }};
+"#,
+        wait_json = serde_json::to_string(wait_js).unwrap_or_else(|_| "\"\"".to_string()),
+        timeout_ms = (timeout.max(0.0) * 1000.0) as u64,
+        interval_ms = (interval.max(0.02) * 1000.0) as u64,
+    );
+    Ok(execute_raw_js(
+        state,
+        &script,
+        Duration::from_secs_f64(timeout.max(0.1) + 1.0),
+    )
+    .await?
+    .data
+    .unwrap_or(Value::Null))
+}
+
+async fn select_tab(state: &AppState, switch_tab_id: Option<String>) -> Result<String> {
+    if let Some(tab_id) = switch_tab_id {
+        state.driver.lock().await.default_session_id = Some(tab_id);
+    }
+    wait_for_sessions(state, Duration::from_secs(5)).await;
+    let driver = state.driver.lock().await;
+    let tab_id = driver
+        .default_session_id
+        .clone()
+        .or_else(|| driver.latest_session_id.clone())
+        .ok_or_else(|| anyhow!("没有可用的浏览器标签页"))?;
+    if !driver
+        .sessions
+        .get(&tab_id)
+        .map(Session::is_active)
+        .unwrap_or(false)
+    {
+        return Err(anyhow!("会话ID {tab_id} 未连接"));
+    }
+    Ok(tab_id)
+}
+
+async fn cdp_call(
+    state: &AppState,
+    tab_id: &str,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<CdpCallResult> {
+    let script = json!({ "cmd": "cdp", "tabId": tab_id.parse::<i64>().unwrap_or_default(), "method": method, "params": params }).to_string();
+    let response = execute_raw_js_on_tab(state, &script, tab_id, timeout).await?;
+    let value = response.data.or(response.result).unwrap_or(Value::Null);
+    match value.get("ok").and_then(Value::as_bool) {
+        Some(true) => Ok(CdpCallResult {
+            ok: true,
+            data: value.get("data").cloned(),
+            error: None,
+        }),
+        Some(false) => Ok(CdpCallResult {
+            ok: false,
+            data: value.get("data").cloned(),
+            error: value
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| Some(value.to_string())),
+        }),
+        None => Ok(CdpCallResult {
+            ok: true,
+            data: Some(value),
+            error: None,
+        }),
+    }
+}
+
+async fn execute_raw_js_on_tab(
+    state: &AppState,
+    code: &str,
+    tab_id: &str,
+    timeout: Duration,
+) -> Result<ExecResult> {
+    let previous = {
+        let mut driver = state.driver.lock().await;
+        let previous = driver.default_session_id.clone();
+        driver.default_session_id = Some(tab_id.to_string());
+        previous
+    };
+    let result = execute_raw_js(state, code, timeout).await;
+    {
+        let mut driver = state.driver.lock().await;
+        if driver.default_session_id.as_deref() == Some(tab_id) {
+            driver.default_session_id = previous;
+        }
+    }
+    result
+}
+
+async fn batch_cdp_call(
+    state: &AppState,
+    tab_id: &str,
+    commands: Vec<Value>,
+    timeout: Duration,
+) -> Result<Value> {
+    let script = json!({
+        "cmd": "batch",
+        "tabId": tab_id.parse::<i64>().unwrap_or_default(),
+        "commands": commands,
+    })
+    .to_string();
+    let response = execute_raw_js_on_tab(state, &script, tab_id, timeout).await?;
+    let value = response.data.or(response.result).unwrap_or(Value::Null);
+    if value.get("ok").and_then(Value::as_bool) == Some(false) {
+        return Err(anyhow!(value
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("batch cdp failed")
+            .to_string()));
+    }
+    Ok(value)
+}
+
+async fn resolve_target_object(
+    state: &AppState,
+    tab_id: &str,
+    target: &str,
+    timeout: Duration,
+) -> Result<String> {
+    if is_ref_target(target) {
+        let entry = {
+            let driver = state.driver.lock().await;
+            let cache = driver.snapshots.get(tab_id).ok_or_else(|| {
+                anyhow!("unknown ref {target} in tab {tab_id}; run snapshot --tab {tab_id} again")
+            })?;
+            cache.refs.get(target).cloned().ok_or_else(|| {
+                anyhow!("unknown ref {target} in tab {tab_id}; run snapshot --tab {tab_id} again")
+            })?
+        };
+        let current_url = current_location(state, tab_id, timeout)
+            .await
+            .unwrap_or_default();
+        let snapshot_url = state
+            .driver
+            .lock()
+            .await
+            .snapshots
+            .get(tab_id)
+            .map(|cache| cache.url.clone())
+            .unwrap_or_default();
+        if !snapshot_url.is_empty() && !current_url.is_empty() && current_url != snapshot_url {
+            return Err(anyhow!("ref expired: page url changed, run snapshot again"));
+        }
+        let object_id = format!("__backend:{}", entry.backend_dom_node_id);
+        Ok(object_id)
+    } else {
+        Ok(format!("__selector:{}", target))
+    }
+}
+
+async fn current_location(state: &AppState, tab_id: &str, timeout: Duration) -> Result<String> {
+    let response = execute_raw_js_on_tab(state, "return location.href", tab_id, timeout).await?;
+    Ok(response
+        .data
+        .unwrap_or(Value::Null)
+        .as_str()
+        .unwrap_or_default()
+        .to_string())
+}
+
+fn is_ref_target(target: &str) -> bool {
+    let Some(rest) = target.strip_prefix("@e") else {
+        return false;
+    };
+    !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+}
+
+async fn call_function_resolved(
+    state: &AppState,
+    tab_id: &str,
+    object_id: &str,
+    function_declaration: &str,
+    timeout: Duration,
+) -> Result<Value> {
+    let value = if let Some(raw) = object_id.strip_prefix("__backend:") {
+        let backend: i64 = raw.parse()?;
+        batch_cdp_call(
+            state,
+            tab_id,
+            vec![
+                json!({ "cmd": "cdp", "method": "DOM.resolveNode", "params": { "backendNodeId": backend } }),
+                json!({ "cmd": "cdp", "method": "Runtime.callFunctionOn", "params": { "objectId": "$0.object.objectId", "functionDeclaration": function_declaration, "returnByValue": true } }),
+            ],
+            timeout,
+        )
+        .await?
+    } else if let Some(selector) = object_id.strip_prefix("__selector:") {
+        let expression = format!(
+            "document.querySelector({})",
+            serde_json::to_string(selector)?
+        );
+        batch_cdp_call(
+            state,
+            tab_id,
+            vec![
+                json!({ "cmd": "cdp", "method": "Runtime.evaluate", "params": { "expression": expression, "returnByValue": false } }),
+                json!({ "cmd": "cdp", "method": "Runtime.callFunctionOn", "params": { "objectId": "$0.result.objectId", "functionDeclaration": function_declaration, "returnByValue": true } }),
+            ],
+            timeout,
+        )
+        .await?
+    } else {
+        return call_function_value(state, tab_id, object_id, function_declaration, timeout).await;
+    };
+    value
+        .get("results")
+        .and_then(Value::as_array)
+        .and_then(|items| items.get(1))
+        .or_else(|| value.as_array().and_then(|items| items.get(1)))
+        .and_then(|data| data.get("result").and_then(|r| r.get("value")).cloned())
+        .ok_or_else(|| anyhow!("Runtime.callFunctionOn response missing value"))
+}
+
+async fn dom_click(
+    state: &AppState,
+    tab_id: &str,
+    object_id: &str,
+    timeout: Duration,
+) -> Result<Value> {
+    let script = r#"function() {
+      this.scrollIntoView({ block: 'center', inline: 'center' });
+      this.click();
+      return { success: true, tag: this.tagName, text: (this.textContent || '').slice(0, 100) };
+    }"#;
+    call_function_resolved(state, tab_id, object_id, script, timeout).await
+}
+
+async fn dom_fill(
+    state: &AppState,
+    tab_id: &str,
+    object_id: &str,
+    payload: Value,
+    timeout: Duration,
+) -> Result<Value> {
+    let value = payload
+        .get("value")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let append = payload
+        .get("append")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let script = format!(
+        r#"function() {{
+      const __value = {value_json};
+      const __append = {append};
+      const el = this;
+      el.focus();
+      const role = el.getAttribute && (el.getAttribute('role') || '').toLowerCase();
+      const tag = (el.tagName || '').toLowerCase();
+      const editable = el.isContentEditable || tag === 'input' || tag === 'textarea' || role === 'textbox' || role === 'searchbox';
+      if (!editable) return {{ error: 'fill target is not editable' }};
+      if (el.isContentEditable) {{
+        if (!__append) el.textContent = '';
+        const sel = window.getSelection();
+        if (sel) {{ const range = document.createRange(); range.selectNodeContents(el); range.collapse(false); sel.removeAllRanges(); sel.addRange(range); }}
+        let inserted = false;
+        try {{ inserted = document.execCommand('insertText', false, __value); }} catch (_) {{ inserted = false; }}
+        if (!inserted) {{ el.textContent = (__append ? el.textContent : '') + __value; el.dispatchEvent(new InputEvent('input', {{ inputType: 'insertText', data: __value, bubbles: true }})); }}
+        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        return {{ success: true, tag: el.tagName, mode: 'contenteditable', value_length: __value.length }};
+      }}
+      if (tag === 'input' || tag === 'textarea') {{
+        const setter = Object.getOwnPropertyDescriptor(tag === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, 'value')?.set;
+        const next = __append ? (el.value || '') + __value : __value;
+        if (setter) setter.call(el, next); else el.value = next;
+        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        return {{ success: true, tag: el.tagName, mode: 'value', value_length: __value.length }};
+      }}
+      try {{ document.execCommand('insertText', false, __value); }} catch (_) {{}}
+      el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+      el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+      return {{ success: true, tag: el.tagName, mode: 'role-textbox', value_length: __value.length }};
+    }}"#,
+        value_json = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string()),
+        append = append,
+    );
+    let value = call_function_resolved(state, tab_id, object_id, &script, timeout).await?;
+    if let Some(error) = value.get("error").and_then(Value::as_str) {
+        return Err(anyhow!(error.to_string()));
+    }
+    Ok(value)
+}
+
+async fn dom_mouse_click(
+    state: &AppState,
+    tab_id: &str,
+    object_id: &str,
+    timeout: Duration,
+) -> Result<Value> {
+    let box_data = if let Some(raw) = object_id.strip_prefix("__backend:") {
+        let backend: i64 = raw.parse()?;
+        batch_cdp_call(
+            state,
+            tab_id,
+            vec![
+                json!({ "cmd": "cdp", "method": "DOM.resolveNode", "params": { "backendNodeId": backend } }),
+                json!({ "cmd": "cdp", "method": "Runtime.callFunctionOn", "params": { "objectId": "$0.object.objectId", "functionDeclaration": "function() { this.scrollIntoView({ block: 'center', inline: 'center' }); }", "returnByValue": true } }),
+                json!({ "cmd": "cdp", "method": "Runtime.callFunctionOn", "params": { "objectId": "$0.object.objectId", "functionDeclaration": "function() { const r = this.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; }", "returnByValue": true } }),
+            ],
+            timeout,
+        )
+        .await?
+    } else if let Some(selector) = object_id.strip_prefix("__selector:") {
+        let expression = format!(
+            "document.querySelector({})",
+            serde_json::to_string(selector)?
+        );
+        batch_cdp_call(
+            state,
+            tab_id,
+            vec![
+                json!({ "cmd": "cdp", "method": "Runtime.evaluate", "params": { "expression": expression, "returnByValue": false } }),
+                json!({ "cmd": "cdp", "method": "Runtime.callFunctionOn", "params": { "objectId": "$0.result.objectId", "functionDeclaration": "function() { this.scrollIntoView({ block: 'center', inline: 'center' }); }", "returnByValue": true } }),
+                json!({ "cmd": "cdp", "method": "Runtime.callFunctionOn", "params": { "objectId": "$0.result.objectId", "functionDeclaration": "function() { const r = this.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; }", "returnByValue": true } }),
+            ],
+            timeout,
+        )
+        .await?
+    } else {
+        focus_scroll(state, tab_id, object_id, timeout).await?;
+        let result = cdp_call(
+            state,
+            tab_id,
+            "DOM.getBoxModel",
+            json!({ "objectId": object_id }),
+            timeout,
+        )
+        .await?;
+        json!({ "results": [null, null, result.data.unwrap_or(Value::Null)] })
+    };
+    let rect = box_data
+        .get("results")
+        .and_then(Value::as_array)
+        .and_then(|items| items.get(2))
+        .and_then(|data| data.get("result").and_then(|r| r.get("value")).cloned())
+        .or_else(|| {
+            box_data
+                .as_array()
+                .and_then(|items| items.get(2))
+                .and_then(|data| data.get("result").and_then(|r| r.get("value")).cloned())
+        });
+    let (x, y) = if let Some(rect) = rect {
+        let width = rect
+            .get("width")
+            .and_then(Value::as_f64)
+            .unwrap_or_default();
+        let height = rect
+            .get("height")
+            .and_then(Value::as_f64)
+            .unwrap_or_default();
+        if width <= 0.0 || height <= 0.0 {
+            return Err(anyhow!("mouse-click: element has no layout box (display:none / detached / zero-size). Use click for DOM-level fallback."));
+        }
+        (
+            rect.get("x").and_then(Value::as_f64).unwrap_or_default() + width / 2.0,
+            rect.get("y").and_then(Value::as_f64).unwrap_or_default() + height / 2.0,
+        )
+    } else {
+        let content = box_data
+            .get("results")
+            .and_then(Value::as_array)
+            .and_then(|items| items.get(2))
+            .and_then(|data| data.get("model").and_then(|m| m.get("content")).cloned())
+            .and_then(|v| v.as_array().cloned())
+            .ok_or_else(|| anyhow!("mouse-click: element has no layout box (display:none / detached / zero-size). Use click for DOM-level fallback."))?;
+        if content.len() < 8 {
+            return Err(anyhow!("mouse-click: element has no layout box (display:none / detached / zero-size). Use click for DOM-level fallback."));
+        }
+        let n = |idx: usize| content.get(idx).and_then(Value::as_f64).unwrap_or_default();
+        (
+            (n(0) + n(2) + n(4) + n(6)) / 4.0,
+            (n(1) + n(3) + n(5) + n(7)) / 4.0,
+        )
+    };
+    for params in [
+        json!({ "type": "mouseMoved", "x": x, "y": y, "button": "none", "buttons": 0 }),
+        json!({ "type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1 }),
+        json!({ "type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1 }),
+    ] {
+        let result = cdp_call(state, tab_id, "Input.dispatchMouseEvent", params, timeout).await?;
+        if !result.ok {
+            return Err(anyhow!(result
+                .error
+                .unwrap_or_else(|| "mouse-click failed".to_string())));
+        }
+    }
+    Ok(json!({ "success": true, "x": x.round(), "y": y.round() }))
+}
+
+async fn focus_object(
+    state: &AppState,
+    tab_id: &str,
+    object_id: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let script = "function() { this.focus && this.focus(); return true; }";
+    call_function_resolved(state, tab_id, object_id, script, timeout).await?;
+    Ok(())
+}
+
+async fn focus_scroll(
+    state: &AppState,
+    tab_id: &str,
+    object_id: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let script =
+        "function() { this.scrollIntoView({ block: 'center', inline: 'center' }); return true; }";
+    call_function_resolved(state, tab_id, object_id, script, timeout).await?;
+    Ok(())
+}
+
+async fn call_function_value(
+    state: &AppState,
+    tab_id: &str,
+    object_id: &str,
+    function_declaration: &str,
+    timeout: Duration,
+) -> Result<Value> {
+    let result = cdp_call(
+        state,
+        tab_id,
+        "Runtime.callFunctionOn",
+        json!({ "objectId": object_id, "functionDeclaration": function_declaration, "returnByValue": true }),
+        timeout,
+    )
+    .await?;
+    if !result.ok {
+        return Err(anyhow!(result
+            .error
+            .unwrap_or_else(|| "Runtime.callFunctionOn failed".to_string())));
+    }
+    let data = result.data.unwrap_or(Value::Null);
+    if let Some(details) = data.get("exceptionDetails") {
+        return Err(anyhow!(details.to_string()));
+    }
+    Ok(data
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .cloned()
+        .unwrap_or(Value::Null))
+}
+
+async fn dispatch_keys(
+    state: &AppState,
+    tab_id: &str,
+    keys: &str,
+    timeout: Duration,
+) -> Result<Value> {
+    let platform = if cfg!(target_os = "macos") {
+        "mac"
+    } else {
+        "other"
+    };
+    let segments: Vec<&str> = keys.split_whitespace().collect();
+    if segments.is_empty() {
+        return Err(anyhow!("send-keys: keys is required"));
+    }
+    let mut dispatched = 0;
+    for segment in segments {
+        let key = parse_key_segment(segment, platform)?;
+        dispatch_key_segment(state, tab_id, key, timeout).await?;
+        dispatched += 1;
+    }
+    Ok(json!({ "success": true, "dispatched": dispatched }))
+}
+
+#[derive(Debug, Clone)]
+struct KeySegment {
+    modifiers: Vec<KeySpec>,
+    modifier_bits: i64,
+    key: KeySpec,
+}
+
+#[derive(Debug, Clone)]
+struct KeySpec {
+    bit: i64,
+    key: String,
+    code: String,
+    vkc: i64,
+    text: Option<String>,
+}
+
+fn parse_key_segment(segment: &str, platform: &str) -> Result<KeySegment> {
+    let parts: Vec<&str> = segment
+        .split('+')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return Err(anyhow!("send-keys: empty segment"));
+    }
+    let mut modifier_bits = 0;
+    let mut modifiers = Vec::new();
+    for part in &parts[..parts.len().saturating_sub(1)] {
+        let spec = modifier_spec(part, platform)
+            .ok_or_else(|| anyhow!("send-keys: {part} is not a modifier"))?;
+        modifier_bits |= spec.bit;
+        modifiers.push(spec);
+    }
+    let mut key = key_spec(parts[parts.len() - 1])?;
+    if modifier_bits & 8 != 0 {
+        if key.key.len() == 1 && key.key.chars().all(|c| c.is_ascii_lowercase()) {
+            key.key = key.key.to_uppercase();
+            key.text = key.text.as_ref().map(|_| key.key.clone());
+        }
+    }
+    Ok(KeySegment {
+        modifiers,
+        modifier_bits,
+        key,
+    })
+}
+
+fn modifier_spec(input: &str, platform: &str) -> Option<KeySpec> {
+    let name = input.to_ascii_lowercase();
+    let (bit, key, code, vkc) = match name.as_str() {
+        "alt" => (1, "Alt", "AltLeft", 18),
+        "ctrl" | "control" => (2, "Control", "ControlLeft", 17),
+        "cmd" | "meta" => (4, "Meta", "MetaLeft", 91),
+        "shift" => (8, "Shift", "ShiftLeft", 16),
+        "mod" if platform == "mac" => (4, "Meta", "MetaLeft", 91),
+        "mod" => (2, "Control", "ControlLeft", 17),
+        _ => return None,
+    };
+    Some(KeySpec {
+        bit,
+        key: key.to_string(),
+        code: code.to_string(),
+        vkc,
+        text: None,
+    })
+}
+
+fn key_spec(input: &str) -> Result<KeySpec> {
+    let name = input.to_ascii_lowercase();
+    let (key, code, vkc, text) = match name.as_str() {
+        "enter" | "return" => (
+            "Enter".to_string(),
+            "Enter".to_string(),
+            13,
+            Some("\r".to_string()),
+        ),
+        "escape" | "esc" => ("Escape".to_string(), "Escape".to_string(), 27, None),
+        "tab" => ("Tab".to_string(), "Tab".to_string(), 9, None),
+        "backspace" => ("Backspace".to_string(), "Backspace".to_string(), 8, None),
+        "delete" => ("Delete".to_string(), "Delete".to_string(), 46, None),
+        "space" => (
+            " ".to_string(),
+            "Space".to_string(),
+            32,
+            Some(" ".to_string()),
+        ),
+        "arrowup" | "up" => ("ArrowUp".to_string(), "ArrowUp".to_string(), 38, None),
+        "arrowdown" | "down" => ("ArrowDown".to_string(), "ArrowDown".to_string(), 40, None),
+        "arrowleft" | "left" => ("ArrowLeft".to_string(), "ArrowLeft".to_string(), 37, None),
+        "arrowright" | "right" => ("ArrowRight".to_string(), "ArrowRight".to_string(), 39, None),
+        "home" => ("Home".to_string(), "Home".to_string(), 36, None),
+        "end" => ("End".to_string(), "End".to_string(), 35, None),
+        _ if input.len() == 1 && input.chars().all(|c| c.is_ascii_alphabetic()) => {
+            let lower = input.to_ascii_lowercase();
+            let upper = input.to_ascii_uppercase();
+            (
+                lower.clone(),
+                format!("Key{upper}"),
+                upper.as_bytes()[0] as i64,
+                Some(lower),
+            )
+        }
+        _ if input.len() == 1 && input.chars().all(|c| c.is_ascii_digit()) => (
+            input.to_string(),
+            format!("Digit{input}"),
+            input.as_bytes()[0] as i64,
+            Some(input.to_string()),
+        ),
+        _ => return Err(anyhow!("send-keys: unknown key {input}")),
+    };
+    Ok(KeySpec {
+        bit: 0,
+        key,
+        code,
+        vkc,
+        text,
+    })
+}
+
+async fn dispatch_key_segment(
+    state: &AppState,
+    tab_id: &str,
+    segment: KeySegment,
+    timeout: Duration,
+) -> Result<()> {
+    let mut active_bits = 0;
+    for modifier in &segment.modifiers {
+        active_bits |= modifier.bit;
+        dispatch_key_event(
+            state,
+            tab_id,
+            "keyDown",
+            active_bits,
+            modifier,
+            None,
+            timeout,
+        )
+        .await?;
+    }
+    let text = if segment.modifier_bits & !8 == 0 {
+        segment.key.text.as_deref()
+    } else {
+        None
+    };
+    dispatch_key_event(
+        state,
+        tab_id,
+        "keyDown",
+        segment.modifier_bits,
+        &segment.key,
+        text,
+        timeout,
+    )
+    .await?;
+    dispatch_key_event(
+        state,
+        tab_id,
+        "keyUp",
+        segment.modifier_bits,
+        &segment.key,
+        None,
+        timeout,
+    )
+    .await?;
+    for modifier in segment.modifiers.iter().rev() {
+        active_bits &= !modifier.bit;
+        dispatch_key_event(state, tab_id, "keyUp", active_bits, modifier, None, timeout).await?;
+    }
+    Ok(())
+}
+
+async fn dispatch_key_event(
+    state: &AppState,
+    tab_id: &str,
+    event_type: &str,
+    modifiers: i64,
+    spec: &KeySpec,
+    text: Option<&str>,
+    timeout: Duration,
+) -> Result<()> {
+    let mut params = json!({ "type": event_type, "modifiers": modifiers, "key": spec.key, "code": spec.code, "windowsVirtualKeyCode": spec.vkc });
+    if let Some(text) = text {
+        params["text"] = json!(text);
+    }
+    let result = cdp_call(state, tab_id, "Input.dispatchKeyEvent", params, timeout).await?;
+    if !result.ok {
+        return Err(anyhow!(result
+            .error
+            .unwrap_or_else(|| "send-keys failed".to_string())));
+    }
+    Ok(())
+}
+
+fn ax_string(value: &Option<AxValue>) -> Option<String> {
+    value.as_ref().and_then(|v| {
+        let value = v.value.as_ref()?;
+        let is_string_like = matches!(
+            v.value_type.as_deref(),
+            Some("string")
+                | Some("computedString")
+                | Some("token")
+                | Some("internalRole")
+                | Some("role")
+        );
+        Some(if is_string_like {
+            value.as_str().unwrap_or_default().to_string()
+        } else if let Some(s) = value.as_str() {
+            s.to_string()
+        } else if let Some(n) = value.as_i64() {
+            n.to_string()
+        } else if let Some(n) = value.as_u64() {
+            n.to_string()
+        } else if let Some(n) = value.as_f64() {
+            n.to_string()
+        } else if let Some(b) = value.as_bool() {
+            b.to_string()
+        } else {
+            value.to_string().trim_matches('"').to_string()
+        })
+    })
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        if value.trim().is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    })
+}
+
+fn truncate_text(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        value.to_string()
+    } else {
+        format!("{}...", value.chars().take(max).collect::<String>())
+    }
+}
+
+fn is_operable_role(role: &str) -> bool {
+    matches!(
+        role,
+        "button"
+            | "link"
+            | "textbox"
+            | "searchbox"
+            | "checkbox"
+            | "radio"
+            | "combobox"
+            | "listbox"
+            | "menuitem"
+            | "menuitemcheckbox"
+            | "menuitemradio"
+            | "option"
+            | "slider"
+            | "spinbutton"
+            | "switch"
+            | "tab"
+            | "treeitem"
+    )
+}
+
+fn role_is_context(role: &str) -> bool {
+    matches!(
+        role,
+        "form" | "dialog" | "alert" | "heading" | "main" | "navigation" | "region"
+    )
+}
+
+async fn extension_control(
+    state: &AppState,
+    tab_id: &str,
+    command: &str,
+    payload: Value,
+) -> Result<Value> {
+    let mut body = serde_json::Map::new();
+    body.insert("cmd".to_string(), json!(command));
+    body.insert(
+        "tabId".to_string(),
+        json!(tab_id.parse::<i64>().unwrap_or_default()),
+    );
+    if let Value::Object(map) = payload {
+        for (key, value) in map {
+            body.insert(key, value);
+        }
+    }
+    let response = execute_raw_js_on_tab(
+        state,
+        &Value::Object(body).to_string(),
+        tab_id,
+        Duration::from_secs(30),
+    )
+    .await?;
+    let value = response.data.or(response.result).unwrap_or(Value::Null);
+    if value.get("ok").and_then(Value::as_bool) == Some(false) {
+        return Err(anyhow!(value
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("extension command failed")
+            .to_string()));
+    }
+    Ok(value)
+}
+
+async fn network_start(State(state): State<AppState>, Json(req): Json<TabRequest>) -> Json<Value> {
+    touch(&state).await;
+    let result = async {
+        let tab_id = select_tab(&state, req.switch_tab_id).await?;
+        extension_control(&state, &tab_id, "networkStart", json!({})).await
+    }
+    .await;
+    Json(match result {
+        Ok(value) => json!({ "ok": true, "result": value }),
+        Err(err) => json!({ "ok": false, "error": err.to_string() }),
+    })
+}
+
+async fn network_list(
+    State(state): State<AppState>,
+    Json(req): Json<NetworkListRequest>,
+) -> Json<Value> {
+    touch(&state).await;
+    let result = async {
+        let tab_id = select_tab(&state, req.switch_tab_id).await?;
+        extension_control(
+            &state,
+            &tab_id,
+            "networkList",
+            json!({ "filter": req.filter, "limit": req.limit }),
+        )
+        .await
+    }
+    .await;
+    Json(match result {
+        Ok(value) => json!({ "ok": true, "result": value }),
+        Err(err) => json!({ "ok": false, "error": err.to_string() }),
+    })
+}
+
+async fn network_detail(
+    State(state): State<AppState>,
+    Json(req): Json<NetworkDetailRequest>,
+) -> Json<Value> {
+    touch(&state).await;
+    let result = async {
+        let tab_id = select_tab(&state, req.switch_tab_id).await?;
+        extension_control(
+            &state,
+            &tab_id,
+            "networkDetail",
+            json!({ "requestId": req.request_id }),
+        )
+        .await
+    }
+    .await;
+    Json(match result {
+        Ok(value) => json!({ "ok": true, "result": value }),
+        Err(err) => json!({ "ok": false, "error": err.to_string() }),
+    })
+}
+
+async fn network_clear(State(state): State<AppState>, Json(req): Json<TabRequest>) -> Json<Value> {
+    touch(&state).await;
+    let result = async {
+        let tab_id = select_tab(&state, req.switch_tab_id).await?;
+        extension_control(&state, &tab_id, "networkClear", json!({})).await
+    }
+    .await;
+    Json(match result {
+        Ok(value) => json!({ "ok": true, "result": value }),
+        Err(err) => json!({ "ok": false, "error": err.to_string() }),
+    })
+}
+
+async fn network_stop(State(state): State<AppState>, Json(req): Json<TabRequest>) -> Json<Value> {
+    touch(&state).await;
+    let result = async {
+        let tab_id = select_tab(&state, req.switch_tab_id).await?;
+        extension_control(&state, &tab_id, "networkStop", json!({})).await
+    }
+    .await;
+    Json(match result {
+        Ok(value) => json!({ "ok": true, "result": value }),
+        Err(err) => json!({ "ok": false, "error": err.to_string() }),
+    })
+}
+
+async fn console_start(State(state): State<AppState>, Json(req): Json<TabRequest>) -> Json<Value> {
+    touch(&state).await;
+    let result = async {
+        let tab_id = select_tab(&state, req.switch_tab_id).await?;
+        extension_control(&state, &tab_id, "consoleStart", json!({})).await
+    }
+    .await;
+    Json(match result {
+        Ok(value) => json!({ "ok": true, "result": value }),
+        Err(err) => json!({ "ok": false, "error": err.to_string() }),
+    })
+}
+
+async fn console_list(
+    State(state): State<AppState>,
+    Json(req): Json<ConsoleListRequest>,
+) -> Json<Value> {
+    touch(&state).await;
+    let result = async {
+        let tab_id = select_tab(&state, req.switch_tab_id).await?;
+        extension_control(
+            &state,
+            &tab_id,
+            "consoleList",
+            json!({ "level": req.level, "limit": req.limit }),
+        )
+        .await
+    }
+    .await;
+    Json(match result {
+        Ok(value) => json!({ "ok": true, "result": value }),
+        Err(err) => json!({ "ok": false, "error": err.to_string() }),
+    })
+}
+
+async fn console_clear(State(state): State<AppState>, Json(req): Json<TabRequest>) -> Json<Value> {
+    touch(&state).await;
+    let result = async {
+        let tab_id = select_tab(&state, req.switch_tab_id).await?;
+        extension_control(&state, &tab_id, "consoleClear", json!({})).await
+    }
+    .await;
+    Json(match result {
+        Ok(value) => json!({ "ok": true, "result": value }),
+        Err(err) => json!({ "ok": false, "error": err.to_string() }),
+    })
+}
+
+async fn console_stop(State(state): State<AppState>, Json(req): Json<TabRequest>) -> Json<Value> {
+    touch(&state).await;
+    let result = async {
+        let tab_id = select_tab(&state, req.switch_tab_id).await?;
+        extension_control(&state, &tab_id, "consoleStop", json!({})).await
+    }
+    .await;
+    Json(match result {
+        Ok(value) => json!({ "ok": true, "result": value }),
+        Err(err) => json!({ "ok": false, "error": err.to_string() }),
+    })
+}
+
+async fn screenshot(
+    State(state): State<AppState>,
+    Json(req): Json<ScreenshotRequest>,
+) -> Json<Value> {
+    touch(&state).await;
+    Json(match screenshot_page(&state, req).await {
+        Ok(value) => json!({ "ok": true, "result": value }),
+        Err(err) => json!({ "ok": false, "error": err.to_string() }),
+    })
+}
+
+async fn save_pdf(State(state): State<AppState>, Json(req): Json<SavePdfRequest>) -> Json<Value> {
+    touch(&state).await;
+    Json(match save_pdf_page(&state, req).await {
+        Ok(value) => json!({ "ok": true, "result": value }),
+        Err(err) => json!({ "ok": false, "error": err.to_string() }),
+    })
+}
+
+async fn screenshot_page(state: &AppState, req: ScreenshotRequest) -> Result<Value> {
+    let tab_id = select_tab(state, req.switch_tab_id).await?;
+    let timeout = Duration::from_secs_f64(req.timeout.max(0.1));
+    let format = normalize_screenshot_format(&req.format)?;
+    let target = match (req.target, req.selector) {
+        (Some(_), Some(_)) => {
+            return Err(anyhow!("screenshot: --target 不能和 --selector 同时使用"))
+        }
+        (Some(target), None) | (None, Some(target)) => Some(target),
+        (None, None) => None,
+    };
+    let mut params = json!({ "format": format });
+    if format == "jpeg" {
+        let quality = req.quality.unwrap_or(80);
+        if !(1..=100).contains(&quality) {
+            return Err(anyhow!("screenshot: quality 必须在 1..=100"));
+        }
+        params["quality"] = json!(quality);
+    }
+    if let Some(target) = target.as_deref() {
+        let rect = target_rect(state, &tab_id, target, timeout).await?;
+        params["clip"] = json!({
+            "x": rect.x,
+            "y": rect.y,
+            "width": rect.width,
+            "height": rect.height,
+            "scale": 1.0
+        });
+    } else if req.full_page {
+        let metrics = cdp_call(state, &tab_id, "Page.getLayoutMetrics", json!({}), timeout).await?;
+        if !metrics.ok {
+            return Err(anyhow!(metrics.error.unwrap_or_else(|| {
+                "screenshot: Page.getLayoutMetrics failed".to_string()
+            })));
+        }
+        let content_size = metrics
+            .data
+            .and_then(|data| data.get("contentSize").cloned())
+            .ok_or_else(|| anyhow!("screenshot: missing contentSize"))?;
+        params["clip"] = json!({
+            "x": content_size.get("x").and_then(Value::as_f64).unwrap_or(0.0),
+            "y": content_size.get("y").and_then(Value::as_f64).unwrap_or(0.0),
+            "width": content_size.get("width").and_then(Value::as_f64).unwrap_or(0.0),
+            "height": content_size.get("height").and_then(Value::as_f64).unwrap_or(0.0),
+            "scale": 1.0
+        });
+        params["captureBeyondViewport"] = json!(true);
+    }
+    let captured = cdp_call(state, &tab_id, "Page.captureScreenshot", params, timeout).await?;
+    if !captured.ok {
+        return Err(anyhow!(captured.error.unwrap_or_else(|| {
+            "screenshot: Page.captureScreenshot failed".to_string()
+        })));
+    }
+    let data = captured
+        .data
+        .and_then(|data| data.get("data").and_then(Value::as_str).map(str::to_string))
+        .ok_or_else(|| anyhow!("screenshot: CDP response missing data"))?;
+    let bytes = decode_base64(&data)?;
+    let path = req.out.unwrap_or_else(|| default_screenshot_path(format));
+    write_bytes(&path, &bytes)?;
+    Ok(json!({
+        "status": "success",
+        "path": path,
+        "format": format,
+        "bytes": bytes.len(),
+        "target": target,
+        "full_page": req.full_page
+    }))
+}
+
+async fn save_pdf_page(state: &AppState, req: SavePdfRequest) -> Result<Value> {
+    let tab_id = select_tab(state, req.switch_tab_id).await?;
+    let timeout = Duration::from_secs_f64(req.timeout.max(0.1));
+    let (paper_width, paper_height) = paper_size(&req.paper)?;
+    if !(0.1..=2.0).contains(&req.scale) {
+        return Err(anyhow!("save-pdf: scale 必须在 0.1..=2.0"));
+    }
+    let title = current_title(state, &tab_id, timeout)
+        .await
+        .unwrap_or_else(|_| "page".to_string());
+    let result = cdp_call(
+        state,
+        &tab_id,
+        "Page.printToPDF",
+        json!({
+            "printBackground": req.print_background,
+            "landscape": req.landscape,
+            "scale": req.scale,
+            "paperWidth": paper_width,
+            "paperHeight": paper_height,
+            "preferCSSPageSize": true
+        }),
+        timeout,
+    )
+    .await?;
+    if !result.ok {
+        return Err(anyhow!(result
+            .error
+            .unwrap_or_else(|| "save-pdf: Page.printToPDF failed".to_string())));
+    }
+    let data = result
+        .data
+        .and_then(|data| data.get("data").and_then(Value::as_str).map(str::to_string))
+        .ok_or_else(|| anyhow!("save-pdf: CDP response missing data"))?;
+    let bytes = decode_base64(&data)?;
+    const MAX_PDF_BYTES: usize = 50 * 1024 * 1024;
+    if bytes.len() > MAX_PDF_BYTES {
+        return Err(anyhow!("save-pdf: PDF exceeds max size 50MB"));
+    }
+    let path = req.out.unwrap_or_else(|| default_pdf_path(&title));
+    write_bytes(&path, &bytes)?;
+    Ok(json!({
+        "status": "success",
+        "path": path,
+        "bytes": bytes.len(),
+        "paper": req.paper.to_ascii_lowercase(),
+        "landscape": req.landscape,
+        "scale": req.scale,
+        "print_background": req.print_background
+    }))
+}
+
+async fn target_rect(
+    state: &AppState,
+    tab_id: &str,
+    target: &str,
+    timeout: Duration,
+) -> Result<RectInfo> {
+    let object_id = resolve_target_object(state, tab_id, target, timeout).await?;
+    let script = "function() { this.scrollIntoView({ block: 'center', inline: 'center' }); const r = this.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; }";
+    let value = call_function_resolved(state, tab_id, &object_id, script, timeout).await?;
+    let rect: RectInfo = serde_json::from_value(value)?;
+    if rect.width <= 0.0 || rect.height <= 0.0 {
+        return Err(anyhow!("screenshot: target has no layout box"));
+    }
+    Ok(rect)
+}
+
+async fn current_title(state: &AppState, tab_id: &str, timeout: Duration) -> Result<String> {
+    let response = execute_raw_js_on_tab(state, "return document.title", tab_id, timeout).await?;
+    Ok(response
+        .data
+        .unwrap_or(Value::Null)
+        .as_str()
+        .unwrap_or("page")
+        .to_string())
+}
+
+fn normalize_screenshot_format(format: &str) -> Result<&'static str> {
+    match format.to_ascii_lowercase().as_str() {
+        "png" => Ok("png"),
+        "jpg" | "jpeg" => Ok("jpeg"),
+        other => Err(anyhow!(
+            "screenshot: unsupported format {other}, expected png or jpeg"
+        )),
+    }
+}
+
+fn paper_size(paper: &str) -> Result<(f64, f64)> {
+    match paper.to_ascii_lowercase().as_str() {
+        "letter" => Ok((8.5, 11.0)),
+        "legal" => Ok((8.5, 14.0)),
+        "a4" => Ok((8.27, 11.69)),
+        "a3" => Ok((11.69, 16.54)),
+        "tabloid" => Ok((11.0, 17.0)),
+        other => Err(anyhow!("save-pdf: unsupported paper {other}")),
+    }
+}
+
+fn default_screenshot_path(format: &str) -> PathBuf {
+    PathBuf::from("/tmp/agent-browser-cli-screenshots").join(format!(
+        "screenshot-{}.{}",
+        timestamp_compact(),
+        if format == "jpeg" { "jpg" } else { format }
+    ))
+}
+
+fn default_pdf_path(title: &str) -> PathBuf {
+    PathBuf::from("/tmp/agent-browser-cli-pdfs").join(format!(
+        "{}-{}.pdf",
+        sanitize_filename(title),
+        timestamp_compact()
+    ))
+}
+
+fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, bytes)?;
+    Ok(())
+}
+
+fn timestamp_compact() -> String {
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    secs.to_string()
+}
+
+fn sanitize_filename(input: &str) -> String {
+    let mut out = String::new();
+    for ch in input.chars() {
+        let mapped = if matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+            || ch.is_control()
+            || ch.is_whitespace()
+        {
+            '-'
+        } else {
+            ch
+        };
+        if mapped == '-' && out.ends_with('-') {
+            continue;
+        }
+        out.push(mapped);
+        if out.chars().count() >= 80 {
+            break;
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "page".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn decode_base64(input: &str) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits = 0;
+    for byte in input.bytes().filter(|b| !b.is_ascii_whitespace()) {
+        if byte == b'=' {
+            break;
+        }
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return Err(anyhow!("invalid base64 data")),
+        } as u32;
+        buf = (buf << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xff) as u8);
+        }
+    }
+    Ok(out)
 }
