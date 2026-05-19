@@ -212,16 +212,74 @@ function getDebugSession(tabId) {
   return session;
 }
 
+function isDebuggerAlreadyAttachedError(error) {
+  return /Another debugger is already attached/i.test(String(error?.message || error || ''));
+}
+
+async function isDebuggerTargetAttached(tabId) {
+  try {
+    const targets = await chrome.debugger.getTargets();
+    const target = targets.find(t => t.tabId === tabId);
+    return !!target?.attached;
+  } catch (e) {
+    console.log('[TMWD-DEBUG] getTargets failed:', e.message);
+    return false;
+  }
+}
+
+async function attachDebuggerWithRecovery(tabId) {
+  try {
+    await chrome.debugger.attach({ tabId }, '1.3');
+    return;
+  } catch (e) {
+    if (!isDebuggerAlreadyAttachedError(e)) throw e;
+
+    // daemon 非 graceful 退出时，Chrome 可能还保留本扩展的旧 attach。
+    // 这里只在 Chrome 明确报告该 tab 已 attached 后做一次 detach+retry，避免正常路径反复抖动。
+    const attached = await isDebuggerTargetAttached(tabId);
+    if (!attached) throw e;
+    try {
+      await chrome.debugger.detach({ tabId });
+    } catch (detachError) {
+      console.log('[TMWD-DEBUG] stale detach failed:', tabId, detachError.message);
+      throw e;
+    }
+    await chrome.debugger.attach({ tabId }, '1.3');
+  }
+}
+
 async function ensureDebugAttached(session) {
   if (session.attached) return;
-  await chrome.debugger.attach({ tabId: session.tabId }, '1.3');
+  await attachDebuggerWithRecovery(session.tabId);
   session.attached = true;
+}
+
+async function detachDebugSession(session, reason = 'manual') {
+  if (!session) return;
+  if (session.attached) {
+    try { await chrome.debugger.detach({ tabId: session.tabId }); } catch (e) {
+      console.log('[TMWD-DEBUG] detach failed:', session.tabId, reason, e.message);
+    }
+  }
+  session.attached = false;
+  session.network = false;
+  session.console = false;
 }
 
 async function detachDebugIfIdle(session) {
   if (!session.attached || session.network || session.console) return;
-  try { await chrome.debugger.detach({ tabId: session.tabId }); } catch (_) {}
-  session.attached = false;
+  await detachDebugSession(session, 'idle');
+}
+
+async function detachAllDebugSessions(reason = 'cleanup') {
+  const sessions = [...debugSessions.values()];
+  for (const session of sessions) {
+    session.requests.clear();
+    session.requestOrder = [];
+    session.logs = [];
+    await detachDebugSession(session, reason);
+  }
+  debugSessions.clear();
 }
 
 async function handleNetworkStart(msg, sender) {
@@ -504,20 +562,7 @@ async function handleCloseTab(msg, sender) {
 
 async function handleDebugClearAll() {
   const tabIds = [...debugSessions.keys()];
-  for (const tabId of tabIds) {
-    const session = debugSessions.get(tabId);
-    if (!session) continue;
-    session.requests.clear();
-    session.requestOrder = [];
-    session.logs = [];
-    session.network = false;
-    session.console = false;
-    if (session.attached) {
-      try { await chrome.debugger.detach({ tabId }); } catch (_) {}
-      session.attached = false;
-    }
-  }
-  debugSessions.clear();
+  await detachAllDebugSessions('debugClearAll');
   return { ok: true, status: 'cleared', tabs: tabIds.length };
 }
 
@@ -593,7 +638,7 @@ async function handleBatch(msg, sender) {
         }
         if (attached !== tabId) {
           if (attached) { await chrome.debugger.detach({ tabId: attached }); attached = null; }
-          await chrome.debugger.attach({ tabId }, '1.3');
+          await attachDebuggerWithRecovery(tabId);
           attached = tabId;
         }
         R.push(await chrome.debugger.sendCommand({ tabId }, c.method, resolve$N(c.params)));
@@ -616,7 +661,7 @@ async function handleCDP(msg, sender) {
     return { ok: true, data: { skipped: true, reason: 'Page.bringToFront requires allowFocus=true' } };
   }
   try {
-    await chrome.debugger.attach({ tabId }, '1.3');
+    await attachDebuggerWithRecovery(tabId);
     const result = await chrome.debugger.sendCommand({ tabId }, msg.method, msg.params || {});
     await chrome.debugger.detach({ tabId });
     return { ok: true, data: result };
@@ -843,7 +888,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     } else {
       // Connection lost, switch to probe mode
       ws = null;
-      scheduleProbe();
+      detachAllDebugSessions('keepalive-lost').finally(() => scheduleProbe());
     }
   }
   if (alarm.name === 'tmwd-ws-probe') {
@@ -893,7 +938,7 @@ async function handleWsExec(data) {
       console.log('[TMWD-WS] CDP fallback for tab', tabId);
       const wrappedCode = buildCdpScript(data.code);
       try {
-        await chrome.debugger.attach({ tabId }, '1.3');
+        await attachDebuggerWithRecovery(tabId);
         await setDialogSuppressionByCdp(tabId, true);
         const cdpRes = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
           expression: wrappedCode, awaitPromise: true, returnByValue: true
@@ -994,9 +1039,11 @@ async function connectWS() {
       console.error('[TMWD-WS] message parse error', e);
     }
   };
-  ws.onclose = () => {
+  ws.onclose = async () => {
     console.log('[TMWD-WS] Disconnected');
     ws = null;
+    // daemon crash/kill 时 server.rs 无法发送 debugClearAll，扩展必须自行释放 CDP attach。
+    await detachAllDebugSessions('ws-close');
     scheduleProbe();
   };
   ws.onerror = (e) => {

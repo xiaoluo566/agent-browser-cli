@@ -6,6 +6,10 @@
 
 ## v0.3.4 - 2026-05-19
 
+### 修复
+
+- 修复 daemon 非 graceful 退出后扩展侧 CDP attach 状态残留，导致后续 exec/CDP fallback 报 `Another debugger is already attached` 的问题。
+
 ### 调整
 
 - 调整 `agent-browser-cli` skill 的默认操作流程：浏览器任务优先直接执行 `tabs` / `open` / `exec` / `scan`，由 CLI 按需自动启动 daemon。
