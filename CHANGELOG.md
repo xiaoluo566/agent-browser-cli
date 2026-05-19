@@ -1,4 +1,8 @@
-## 未发布
+# 更新日志
+
+所有重要变更都会记录在这里。日期使用北京时间自然日。
+
+## 已发布
 
 ## v0.3.3 - 2026-05-18
 
@@ -10,10 +14,6 @@
 - 新增 `lookup tab|browser|profile` 反查命令，可由 `tab_id` 反查 `browser_id` / `profile_id` / `profile_label`，或由 `browser_id` 反查所属 profile。
 - 移除扩展默认注入的全局 `alert` / `confirm` / `prompt` 重写，改为 CLI 页面执行期间临时抑制弹窗并在命令结束后恢复原生函数。
 - 新增 `profile-label set|clear`，并在 Chrome 扩展 popup 中支持设置 Profile Label；label 冲突时 CLI 按歧义处理，不参与内部路由主键。
-
-# 更新日志
-
-所有重要变更都会记录在这里。日期使用北京时间自然日。
 
 ## v0.3.2 - 2026-05-17
 
